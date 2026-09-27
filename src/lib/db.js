@@ -59,6 +59,30 @@ export async function updateLeadScore(leadId, scoreFields) {
   if (error) throw error;
 }
 
+// Bulk version of the above — updates many leads' scores in a handful of
+// requests instead of one network round-trip per lead. Each row must
+// include id (the upsert conflict target) plus the NOT NULL columns
+// (user_id, entity_id, name) so Postgres's upsert validates even though
+// every one of these ids already exists and only the UPDATE branch ever
+// actually runs — columns not included here (like `draft`) are left
+// untouched, not cleared.
+export async function bulkUpdateLeadScores(leads, scoreFieldsByLeadId) {
+  const userId = await currentUserId();
+  if (!userId) throw new Error('Not signed in');
+  const CHUNK = 300;
+  for (let i = 0; i < leads.length; i += CHUNK) {
+    const chunk = leads.slice(i, i + CHUNK).map(l => ({
+      id: l.id,
+      user_id: userId,
+      entity_id: l.entity_id,
+      name: l.name,
+      ...scoreFieldsByLeadId(l),
+    }));
+    const { error } = await supabase.from('leads').upsert(chunk, { onConflict: 'id' });
+    if (error) throw error;
+  }
+}
+
 // --- OUTCOMES -------------------------------------------------------------
 
 export async function fetchOutcomes() {

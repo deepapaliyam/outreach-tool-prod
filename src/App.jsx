@@ -15,7 +15,7 @@ import { computeInsightsData } from './lib/insights';
 import { exportInsightsXLSX, exportInsightsPDF, exportInsightsPPTX, exportInsightsDOCX } from './lib/exports';
 import GmailConnect from './components/GmailConnect';
 import {
-  fetchLeads, upsertNewLeads, updateLeadDraft, updateLeadScore,
+  fetchLeads, upsertNewLeads, updateLeadDraft, updateLeadScore, bulkUpdateLeadScores,
   fetchOutcomes, saveOutcome,
   fetchSenderProfile, saveSenderProfile,
 } from './lib/db';
@@ -339,9 +339,11 @@ export default function App() {
     setRescoreStatus('');
     setRescoreProgress({ done: 0, total: leads.length });
     try {
-      const updated = [];
-      for (let i = 0; i < leads.length; i++) {
-        const lead = leads[i];
+      // Compute every score locally first — this part is pure JS and
+      // effectively instant even for hundreds of leads. Only the save
+      // to the database needs network round-trips, so batch those.
+      const rescoredById = new Map();
+      const updated = leads.map(lead => {
         const rescored = scoreLead(lead, preferredRegions);
         const patch = {
           need_score: rescored.need_score,
@@ -350,10 +352,11 @@ export default function App() {
           priority_score: rescored.priority_score,
           score_breakdown: rescored.score_breakdown,
         };
-        await updateLeadScore(lead.id, patch);
-        updated.push({ ...lead, ...patch });
-        setRescoreProgress({ done: i + 1, total: leads.length });
-      }
+        rescoredById.set(lead.id, patch);
+        return { ...lead, ...patch };
+      });
+      await bulkUpdateLeadScores(leads, (l) => rescoredById.get(l.id));
+      setRescoreProgress({ done: leads.length, total: leads.length });
       setLeads(updated);
       setRescoreStatus(`Re-scored ${updated.length} lead${updated.length === 1 ? '' : 's'} with your current preferred regions.`);
     } catch (e) {
@@ -363,13 +366,19 @@ export default function App() {
     }
   };
 
+  const [draftError, setDraftError] = useState('');
+
   const runDraft = async (lead) => {
     setGenerating(g => ({ ...g, [lead.id]: true }));
+    setDraftError('');
     try {
       const draft = await generateDraft(lead, sender);
       await updateLeadDraft(lead.id, draft);
       setLeads(prev => prev.map(l => l.id === lead.id ? { ...l, draft } : l));
-    } catch (e) { console.error(e); }
+    } catch (e) {
+      console.error(e);
+      setDraftError(`Draft failed for "${lead.name}": ${e.message}`);
+    }
     finally { setGenerating(g => ({ ...g, [lead.id]: false })); }
   };
 
@@ -386,14 +395,22 @@ export default function App() {
     if (!candidates.length) return;
     setBatchRunning(true);
     setBatchProgress({ done: 0, total: candidates.length });
+    setDraftError('');
+    let lastError = '';
+    let failCount = 0;
     for (let i = 0; i < candidates.length; i++) {
       try {
         const draft = await generateDraft(candidates[i], sender);
         await updateLeadDraft(candidates[i].id, draft);
         setLeads(prev => prev.map(l => l.id === candidates[i].id ? { ...l, draft } : l));
-      } catch (e) { /* skip failed, continue */ }
+      } catch (e) {
+        console.error(e);
+        failCount++;
+        lastError = e.message;
+      }
       setBatchProgress({ done: i + 1, total: candidates.length });
     }
+    if (failCount > 0) setDraftError(`${failCount} of ${candidates.length} drafts failed. Last error: ${lastError}`);
     setBatchRunning(false);
   };
 
@@ -755,6 +772,7 @@ export default function App() {
                   </button>
                 </div>
                 {(!sender.name || !sender.offer) && <div className="status-line">Fill in your details first.</div>}
+                {draftError && <div className="status-line" style={{ color: 'var(--unverified)' }}>{draftError}</div>}
 
                 <h2 style={{ marginTop: 22 }}>Queue</h2>
                 <div className="mini-list">
