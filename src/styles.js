@@ -112,6 +112,9 @@ tr.clickable-row:hover{ background:#F1F0EA; }
 tr.row-sel{ background:#E4F0EC; }
 .import-row{ display:flex; align-items:center; gap:10px; margin-bottom:6px; flex-wrap:wrap; }
 .import-label{ cursor:pointer; display:inline-flex; align-items:center; gap:6px; }
+.test-banner{ display:flex; align-items:center; gap:12px; flex-wrap:wrap; padding:12px 18px; border-radius:8px; margin-bottom:16px; font-size:13.5px; }
+.test-banner.on{ background:#E4F0EC; border:1px solid #B9D9CC; color:var(--teal-deep); }
+.test-banner.off{ background:#FBE3DC; border:1px solid #E8B4A3; color:var(--unverified); }
 .infopanel{ background:#F1F6F4; border-color:#D6E6E1; }
 .how-grid{ display:grid; grid-template-columns:1fr 1fr 1fr; gap:18px; }
 @media (max-width:720px){ .how-grid{ grid-template-columns:1fr; } }

@@ -257,7 +257,11 @@ export default function App() {
     try {
       const profile = await fetchSenderProfile();
       if (profile) {
-        setSender({ name: profile.name, offer: profile.offer, tone: profile.tone, voiceSample: profile.voice_sample, referenceNotes: profile.reference_notes || [] });
+        setSender({
+          name: profile.name, offer: profile.offer, tone: profile.tone,
+          voiceSample: profile.voice_sample, referenceNotes: profile.reference_notes || [],
+          testMode: profile.test_mode !== false, testEmail: profile.test_email || '',
+        });
         setReferenceUrlsInput((profile.reference_urls || []).join('\n'));
       }
     } catch (e) {
@@ -294,6 +298,8 @@ export default function App() {
         voice_sample: nextSender.voiceSample || '',
         reference_urls: urls,
         reference_notes: referenceNotes,
+        test_mode: nextSender.testMode !== false,
+        test_email: nextSender.testEmail || '',
       });
       setProfileStatus('Saved.');
     } catch (e) {
@@ -428,13 +434,39 @@ export default function App() {
   };
 
   const [sending, setSending] = useState({});
+  const setTestModeAndPersist = async (newVal) => {
+    const nextSender = { ...sender, testMode: newVal };
+    setSender(nextSender);
+    try {
+      await saveSenderProfile({
+        name: nextSender.name || '', offer: nextSender.offer || '', tone: nextSender.tone || '',
+        voice_sample: nextSender.voiceSample || '',
+        reference_urls: (nextSender.referenceNotes || []).map(r => r.url),
+        reference_notes: nextSender.referenceNotes || [],
+        test_mode: newVal, test_email: nextSender.testEmail || '',
+      });
+    } catch (e) {
+      console.error('Failed to persist test mode change', e);
+    }
+  };
+  const disableTestMode = () => {
+    if (window.confirm("Turn OFF test mode? \"Send via Gmail\" will start sending REAL emails to leads' real addresses immediately.")) {
+      setTestModeAndPersist(false);
+    }
+  };
+  const enableTestMode = () => setTestModeAndPersist(true);
+
   const sendNow = async (lead) => {
     setSending(s => ({ ...s, [lead.id]: true }));
     try {
-      await sendViaGmail(lead);
-      setLeads(prev => prev.map(l => l.id === lead.id
-        ? { ...l, outcome: { ...l.outcome, contacted: true, contacted_date: new Date().toISOString().slice(0, 10), sent_via_gmail: true, sent_subject: lead.draft.subject, sent_body: lead.draft.body, sent_sources: lead.draft.sources || [] } }
-        : l));
+      const result = await sendViaGmail(lead, { testMode: sender.testMode !== false, testEmailOverride: sender.testEmail });
+      if (result.testMode) {
+        alert(`Test mode: sent to ${result.to} instead of the lead's real address (${result.realTo}). This lead's outcome was NOT changed — it's still unsent and ready for a real send later.`);
+      } else {
+        setLeads(prev => prev.map(l => l.id === lead.id
+          ? { ...l, outcome: { ...l.outcome, contacted: true, contacted_date: new Date().toISOString().slice(0, 10), sent_via_gmail: true, sent_subject: lead.draft.subject, sent_body: lead.draft.body, sent_sources: lead.draft.sources || [] } }
+          : l));
+      }
     } catch (e) {
       alert('Send failed: ' + e.message);
     } finally {
@@ -726,7 +758,21 @@ export default function App() {
 
           {/* DRAFTS ---------------------------------------------------- */}
           {tab === 'drafts' && (
-            <div className="grid-main">
+            <>
+              <div className={`test-banner ${sender.testMode === false ? 'off' : 'on'}`}>
+                {sender.testMode === false ? (
+                  <>
+                    <strong>⚠ Test mode is OFF</strong> — "Send via Gmail" sends real emails to leads' real addresses right now.
+                    <button className="btn-tiny" onClick={enableTestMode}>Turn test mode back on</button>
+                  </>
+                ) : (
+                  <>
+                    <strong>🧪 Test mode is ON</strong> — every "Send via Gmail" goes to {sender.testEmail || 'your own account email'} instead of the lead's real address, and won't mark the lead as contacted.
+                    <button className="btn-tiny" onClick={disableTestMode}>Turn off (send for real)</button>
+                  </>
+                )}
+              </div>
+              <div className="grid-main">
               <div className="card">
                 <h2>Your voice &amp; business</h2>
                 <p className="hint">Saved to your account — shapes every draft's tone, and lets it cite your own work.</p>
@@ -741,6 +787,9 @@ export default function App() {
                     <option>Friendly and enthusiastic</option>
                     <option>Formal</option>
                   </select>
+                </div>
+                <div className="field-row"><label>Test-mode email <span className="opt">(optional — where test sends go instead of your login email)</span></label>
+                  <input type="email" value={sender.testEmail || ''} onChange={e => updateSenderField({ testEmail: e.target.value })} placeholder="defaults to your login email if left blank" />
                 </div>
                 <div className="field-row"><label>Sample of your own writing <span className="opt">(optional — paste a past email so drafts sound more like you)</span></label>
                   <textarea value={sender.voiceSample || ''} onChange={e => updateSenderField({ voiceSample: e.target.value })} placeholder="Paste an email you've actually sent before…" />
@@ -816,6 +865,7 @@ export default function App() {
                 )}
               </div>
             </div>
+            </>
           )}
 
           {/* OUTCOMES -------------------------------------------------- */}
