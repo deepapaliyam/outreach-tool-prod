@@ -6,12 +6,30 @@ import { functionUrl } from '../lib/functionUrl';
 // additionally link their Google identity, requesting Gmail-send scope,
 // then captures the one-time refresh token and hands it to the
 // gmail-store-token function to persist server-side.
+//
+// Also checks REAL linked state on mount (not just "did a fresh OAuth
+// redirect just happen") and offers a Disconnect action — Supabase
+// refuses to re-run linkIdentity() while an identity is already linked,
+// so if the very first grant happened before Manual Linking was turned
+// on (and so came back missing scopes), disconnecting is the only way
+// to force Google to show a genuinely fresh consent screen.
 export default function GmailConnect() {
-  const [connected, setConnected] = useState(null); // null = unknown yet
+  const [connected, setConnected] = useState(null); // null = checking
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
 
+  const checkLinked = async () => {
+    try {
+      const { data, error } = await supabase.auth.getUserIdentities();
+      if (error) throw error;
+      setConnected((data?.identities || []).some(i => i.provider === 'google'));
+    } catch (e) {
+      setConnected(false);
+    }
+  };
+
   useEffect(() => {
+    checkLinked();
     // After the OAuth redirect back, Supabase briefly exposes
     // provider_refresh_token on the session — capture it once, then store it.
     const { data: sub } = supabase.auth.onAuthStateChange(async (event, session) => {
@@ -54,8 +72,40 @@ export default function GmailConnect() {
     // useEffect above picks up the token when it returns.
   };
 
+  const disconnect = async () => {
+    if (!window.confirm('Disconnect Gmail? You\'ll need to reconnect (and re-approve permissions) before sending again.')) return;
+    setBusy(true);
+    setError('');
+    try {
+      const { data, error } = await supabase.auth.getUserIdentities();
+      if (error) throw error;
+      const googleIdentity = (data?.identities || []).find(i => i.provider === 'google');
+      if (googleIdentity) {
+        const { error: unlinkErr } = await supabase.auth.unlinkIdentity(googleIdentity);
+        if (unlinkErr) throw unlinkErr;
+      }
+      setConnected(false);
+    } catch (e) {
+      setError('Disconnect failed: ' + e.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (connected === null) {
+    return <span className="hint">Checking Gmail connection…</span>;
+  }
+
   if (connected) {
-    return <span className="tag verified">Gmail connected</span>;
+    return (
+      <div className="row-inline">
+        <span className="tag verified">Gmail connected</span>
+        <button className="btn-tiny" onClick={disconnect} disabled={busy}>
+          {busy ? 'Disconnecting…' : 'Disconnect (to fix permissions / reconnect fresh)'}
+        </button>
+        {error && <div className="status-line" style={{ color: '#B0361F' }}>{error}</div>}
+      </div>
+    );
   }
   return (
     <div>
