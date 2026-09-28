@@ -1,117 +1,119 @@
-# Outreach Tool — consolidated project (current as of this handoff)
+# Outreach Tool — setup & update guide
 
-This folder is the complete, current state of everything built so far —
-base app, Gmail sending, source citations, status pipeline, exports,
-and selective rewrite. Replace your entire local folder's contents with
-this rather than tracking individual files across the earlier separate
-zips.
+This folder is the complete, current project. To update an existing
+install, extract it over your folder (your `.env` and `node_modules`
+aren't in the zip, so they stay as they are).
 
-## Setup, start to finish
+---
 
-### 1. Database
-In Supabase SQL Editor, run these files **in this order**:
-1. `supabase/schema.sql`
-2. `supabase/gmail_schema.sql`
-3. `supabase/snapshot_schema.sql`
-4. `supabase/sender_profile_schema.sql`
+## A. Updating an install you already have running
 
-(All use `create table if not exists` / `add column if not exists`, so
-re-running any of these is always safe.)
+Do these in order. Anything you've already done is harmless to repeat.
 
-### 2. Local config
-```
-cp .env.example .env
-```
-Fill in `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY` (Supabase →
-Settings → API).
+1. **SQL** — Supabase → SQL Editor, run (each is safe to re-run):
+   - `supabase/test_mode_schema.sql` *(if you haven't already)*
+   - `supabase/send_safety_schema.sql` **(new — send limits)**
+2. **Secret** — needed for the web-presence check:
+   `npx supabase secrets set SERPER_API_KEY=your-key`
+   (free key with 2,500 searches at serper.dev)
+3. **Deploy the two changed functions:**
+   ```
+   npx supabase functions deploy send-email
+   npx supabase functions deploy enrich-lead
+   ```
+4. **Frontend** — replace the files, then `git add . && git commit -m "Send safety + web enrichment" && git push`. Vercel redeploys on its own.
+5. In the app: Drafts tab → check the **Daily safe-send limit** field and click **Save profile**.
 
-### 3. Install
-```
-npm install
-```
+---
 
-### 4. Google Cloud + Supabase Google provider
-Follow `GMAIL_OAUTH_SETUP.md` in full (Google Cloud Console OAuth
-consent screen + credentials, enabling the Google provider in Supabase,
-setting `GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET` secrets). Do this once.
+## B. Fresh install, start to finish
 
-### 5. Secrets and function deploys
-```
-npx supabase secrets set ANTHROPIC_API_KEY=sk-ant-your-key
-npx supabase secrets set GOOGLE_CLIENT_ID=your-client-id
-npx supabase secrets set GOOGLE_CLIENT_SECRET=your-client-secret
+1. **Supabase project** → SQL Editor, run in this order:
+   `schema.sql` → `gmail_schema.sql` → `snapshot_schema.sql` →
+   `sender_profile_schema.sql` → `test_mode_schema.sql` → `send_safety_schema.sql`
+2. **Supabase dashboard settings** (one-time, all off by default):
+   - Authentication → Providers → **Email** → turn **Confirm email OFF**
+     (password sign-up must work without a mail server).
+   - Authentication → Providers → **Google** → enable, paste the
+     Client ID/Secret from `GMAIL_OAUTH_SETUP.md`.
+   - **Enable manual linking** (Supabase calls it "Allow / Enable manual
+     linking"; search the Authentication section for it — Supabase moves
+     it around). Without it, "Connect Gmail" fails with *"Manual linking
+     is disabled"*.
+   - Authentication → URL Configuration → set **Site URL** to your live
+     app URL and add it under **Redirect URLs** with `/**` on the end.
+3. **Google Cloud** — follow `GMAIL_OAUTH_SETUP.md`.
+4. **Secrets and functions** (run inside the project folder, linked to the
+   right project with `npx supabase link --project-ref YOUR-REF`):
+   ```
+   npx supabase secrets set ANTHROPIC_API_KEY=sk-ant-...
+   npx supabase secrets set GOOGLE_CLIENT_ID=...
+   npx supabase secrets set GOOGLE_CLIENT_SECRET=...
+   npx supabase secrets set SERPER_API_KEY=...
 
-npx supabase functions deploy draft
-npx supabase functions deploy send-email
-npx supabase functions deploy gmail-store-token
-npx supabase functions deploy refine-selection
-npx supabase functions deploy fetch-references
-```
+   npx supabase functions deploy draft
+   npx supabase functions deploy send-email
+   npx supabase functions deploy gmail-store-token
+   npx supabase functions deploy refine-selection
+   npx supabase functions deploy fetch-references
+   npx supabase functions deploy enrich-lead
+   ```
+   Check Supabase → Edge Functions afterwards: all six should be listed.
+   (An empty list is why drafts fail with "Failed to fetch".)
+5. **Local run:** copy `.env.example` to `.env` (a real file named
+   exactly `.env`), fill in `VITE_SUPABASE_URL` and
+   `VITE_SUPABASE_ANON_KEY` (Supabase → Settings → API), then
+   `npm install` and `npm run dev`.
+6. **Hosting (Vercel):** push to GitHub, import the repo, add
+   `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY` as environment
+   variables **of type Config** (they're public by design — the
+   anon key is protected by row-level security). If the live site is a
+   blank page with *"supabaseUrl is required"* in the console, delete
+   both variables, re-add them as Config, and redeploy — that is what
+   fixed it for us. Vercel's free Hobby plan is for non-commercial use;
+   move to Pro once this is running for a paying client.
 
-### 6. Run it
-```
-npm run dev
-```
+---
 
-## Hosting-ready architecture note
-Every Supabase Function call (`draft`, `send-email`, `gmail-store-token`,
-`refine-selection`, `fetch-references`) goes through `src/lib/functionUrl.js`,
-which builds an absolute URL from `VITE_SUPABASE_URL` — not a relative
-`/api/...` path. This means the exact same code works identically in
-`npm run dev` and in a production build on any host; there's no
-dev-server-only proxy to keep in sync with hosting config.
+## How sending stays safe
 
-## What this version can do
-- Upload a daily `.xlsx`, dedupe director-rows to businesses, score by
-  need/reachability/region — transparent, inspectable ("Why?" on every
-  row).
-- Generate drafts on demand (single or capped batch), each with an
-  evaluation, cited sources, and a subject/body.
-- **Edit drafts**: hand-type changes, or highlight a phrase and rewrite
-  just that part with an optional instruction.
-- **Send via Gmail** (OAuth, your own account or a test-user client's)
-  or mark as sent manually — either way, the exact sent wording is
-  snapshotted immutably for insights.
-- **Voice/tone profile** (per account, in Supabase): tone, a writing
-  sample, and reference links the app fetches and caches server-side so
-  drafts can cite your own portfolio/case studies by URL.
-- Track outcomes for **every** lead (not just contacted ones), shown as
-  a full table with a computed pipeline status badge — Not contacted →
-  Drafted → Contacted → Replied → Proposal sent → **Client** →
-  **Client (Paid)** — a converted lead is explicitly categorized as a
-  client throughout the app.
-- **Insights**, filterable by industry/state/date range: summary stats
-  (leads, contacted, clients, revenue, avg deal size), a status
-  breakdown chart, reply rate by industry/score band, a conversion
-  funnel, pricing patterns, and a full client list.
-- **Export**: the prioritized list and outcomes as CSV or Excel (the
-  Excel "Outcomes" sheet includes every lead with an Entity ID, so it's
-  designed to be edited and re-uploaded); Insights as Excel, PDF,
-  PowerPoint, or Word.
-- **Import outcomes**: re-upload an edited "Outcomes" sheet (from this
-  tool's own export) on the Track Outcomes tab to bulk-update statuses,
-  matched by Entity ID.
-- Pagination (100 at a time) on both the Upload and Track Outcomes
-  tables.
+- **Test mode is ON by default**, per account. "Send via Gmail" then goes
+  to your own inbox (subject prefixed `[TEST — would send to …]`) and
+  never marks the lead as contacted. Turning it off needs a confirmation.
+- **Save as Gmail draft** puts the email in your Gmail Drafts and sends
+  nothing.
+- For **real sends**, the server (not the browser, so a second tab or a
+  refresh can't get around it) enforces:
+  1. a **daily limit** — default 30, adjustable 1–100, counted over a
+     rolling 24 hours;
+  2. **at least 2 minutes** between sends;
+  3. **the same address never twice in 30 days** (one director often sits
+     on several new entities).
+  Test sends to yourself and drafts don't count and aren't logged.
+- **Spaced batch send** waits at least 3 minutes between emails (default
+  5), trims itself to what's left of today's limit, skips already-emailed
+  recipients, and stops on any real error instead of pushing on.
+- If the limits can't be checked (e.g. the SQL wasn't run), real sends
+  are **refused**, not allowed through.
 
-## Round 5 — what's new, and an honest scoping note
-This round added the Insights exports (Excel/PDF/PPT/Word), richer
-Insights content and filters, the outcomes import/export round-trip,
-the full-table Track Outcomes view, and "Client" categorization.
+## Web-presence check ("Enrich")
 
-**Deliberate scope limit:** the four Insights export formats contain
-data tables, not the on-screen chart images themselves. Capturing the
-rendered recharts SVGs as embedded images (via a library like
-html2canvas) is a real, addable enhancement — but it's the one part of
-this feature that genuinely needs a live browser to verify correctly,
-which wasn't available while building this. Every other part of this
-round — the insights math and all four file formats — was independently
-tested with real data before being handed over: the insights
-aggregation was checked by hand against synthetic data, and each export
-format was run through its actual library calls to confirm a valid
-file comes out the other end.
+Per lead, or for the top N un-checked leads. Custom-domain emails get a
+free direct check; everyone else gets one Serper.dev search (about
+$0.001). Company-registration mirror sites (falconebiz, indiafilings,
+zaubacorp…) are never counted as a website; a search hit is labelled
+**"Possible website found — verify"** because business names collide.
+Results feed the score and the drafts automatically.
 
-## Still ahead (not in this build yet)
-Brand white-labeling per client (name/colors/font). Embedding chart
-images in exports, if wanted, once you can confirm it renders correctly
-in your actual browser.
+## Known limits (worth knowing before you promise anything)
+
+- **One Gmail per account.** No mailbox rotation, so ~30–50 real sends a
+  day is the honest ceiling per user.
+- **Spaced send runs in the browser tab.** Closing the tab or letting the
+  computer sleep stops it (emails already sent stay recorded; just start
+  it again for the rest).
+- **Everything shares your Anthropic and Serper keys** on a shared
+  instance — a dedicated deployment per client (their own keys) avoids
+  that.
+- Insights exports contain data tables, not the on-screen chart images.
+- Brand white-labelling (name/colours per client) isn't built yet.

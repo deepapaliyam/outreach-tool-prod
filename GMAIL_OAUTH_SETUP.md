@@ -1,64 +1,58 @@
-# Setting up Gmail sending (Google Cloud + Supabase dashboard)
+# Gmail sending — Google Cloud and Supabase setup (one time, ~15 min)
 
-This is the "console work" only you can click through — about 15 minutes.
+Google reorganised this console: what used to be one "OAuth consent
+screen" wizard is now **Google Auth Platform** with separate sections
+(Branding, Audience, Data Access, Clients). The steps below match that.
 
 ## A. Google Cloud Console
 
-1. Go to console.cloud.google.com, create a new project (any name, e.g.
-   "outreach-tool").
-2. **Enable the Gmail API**: left menu → APIs & Services → Library →
-   search "Gmail API" → Enable.
-3. **Configure the OAuth consent screen**: APIs & Services → OAuth
-   consent screen.
-   - User type: External (unless you have a Google Workspace org).
-   - Fill in app name, your email, developer contact.
-   - Scopes: add `.../auth/gmail.send`.
-   - **Publishing status: leave as "Testing"** — this is the important
-     part. In Testing, only pre-added test users can connect, but no
-     Google review is required.
-   - **Test users**: add your client's Gmail address here (and your own,
-     for trying it yourself first). Up to 100 addresses.
-4. **Create OAuth credentials**: APIs & Services → Credentials → Create
-   Credentials → OAuth client ID.
-   - Application type: Web application.
-   - Authorized redirect URIs: add your Supabase callback URL —
-     `https://YOUR-PROJECT-ref.supabase.co/auth/v1/callback`
-     (same project-ref as everywhere else in this build).
-   - Save. Copy the **Client ID** and **Client secret** shown.
+1. console.cloud.google.com → create a project (e.g. "outreach-tool").
+2. **APIs & Services → Library → Gmail API → Enable.**
+3. **Google Auth Platform → Branding:** app name, support email, developer
+   contact. (The app name is only what people see on the consent screen.)
+4. **Audience:** user type **External**; leave publishing status on
+   **Testing** (don't publish). Under **Test users**, add every Gmail
+   address that will connect — yours, and each client's *before* they
+   try. Anyone not listed is blocked by Google at the consent screen.
+5. **Data Access → Add or remove scopes:** add
+   `https://www.googleapis.com/auth/gmail.send` and save.
+6. **Clients → Create client:** type **Web application**. Under
+   **Authorized redirect URIs** add
+   `https://YOUR-PROJECT-REF.supabase.co/auth/v1/callback`.
+   (One client can serve several Supabase projects — just add each
+   project's callback URL.) Copy the **Client ID** and **Client secret**
+   (the secret is shown once).
 
-## B. Supabase dashboard
+## B. Supabase
 
-5. **Enable Google as a provider**: Authentication → Providers → Google
-   → toggle on → paste the Client ID and Client secret from step 4 →
-   Save.
-6. **Store the same secret for your Edge Function** (in your terminal,
-   inside the project folder):
+7. Authentication → Providers → **Google** → enable → paste the Client ID
+   and secret → Save.
+8. **Enable manual linking** (Authentication section; off by default).
+   Users sign up with email + password and *then* link Google, which is
+   "manual linking" — without it the button fails with *"Manual linking
+   is disabled"*.
+9. Store the same credentials for the functions:
    ```
-   npx supabase secrets set GOOGLE_CLIENT_ID=your-client-id
-   npx supabase secrets set GOOGLE_CLIENT_SECRET=your-client-secret
-   ```
-7. **Deploy the two new functions**:
-   ```
+   npx supabase secrets set GOOGLE_CLIENT_ID=...
+   npx supabase secrets set GOOGLE_CLIENT_SECRET=...
    npx supabase functions deploy gmail-store-token
    npx supabase functions deploy send-email
    ```
 
-## C. Try it
+## C. Connecting inside the app
 
-8. Apply the three edits in `GMAIL_SETUP_PATCH.md`, run
-   `supabase/gmail_schema.sql` in the SQL Editor, restart `npm run dev`.
-9. Sign in with an email you added as a test user in step 3, open a
-   drafted lead, click **"Connect Gmail to send."** Approve the Google
-   consent screen (it will show an "unverified app" warning — expected
-   in Testing mode; click **Advanced → Go to outreach-tool (unsafe)** to
-   proceed. This warning is exactly what test-user status looks like,
-   not a sign anything's wrong).
-10. Click **Send via Gmail** on a draft. Check the "Sent" folder of that
-    Gmail account to confirm it actually went out.
+10. Drafts tab → **Connect Gmail to send** → approve on Google's screen.
+    It will say the app is "unverified" — expected in Testing mode
+    (Advanced → continue). Check the consent screen lists sending email
+    on your behalf before approving.
+11. If sending later fails with *"insufficient authentication scopes"*,
+    the connection was made without the send permission. Click
+    **Disconnect** next to "Gmail connected", then connect again and
+    approve the Gmail permission. (Supabase won't re-run the flow while
+    an identity is already linked, which is why Disconnect exists.)
 
-## When you're ready to onboard a client
+## Handing over to a client
 
-Add their Gmail address as a test user (step 3) before they try to
-connect — if their address isn't on that list, Google will block the
-consent screen with an access-denied message. That's the one manual
-step per new client until (if ever) you go through full verification.
+For a dedicated deployment, create the Google Cloud project under the
+client's own Google account and use their Client ID/secret, so their
+sending identity and app registration are entirely theirs.

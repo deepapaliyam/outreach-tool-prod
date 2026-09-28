@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import * as XLSX from 'xlsx';
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
@@ -12,12 +12,13 @@ import { sendViaGmail } from './lib/sending';
 import { refineSelection } from './lib/refining';
 import { fetchReferences } from './lib/references';
 import { computeInsightsData } from './lib/insights';
+import { enrichLead } from './lib/enrichment';
 import { exportInsightsXLSX, exportInsightsPDF, exportInsightsPPTX, exportInsightsDOCX } from './lib/exports';
 import GmailConnect from './components/GmailConnect';
 import {
   fetchLeads, upsertNewLeads, updateLeadDraft, updateLeadScore, bulkUpdateLeadScores,
   fetchOutcomes, saveOutcome,
-  fetchSenderProfile, saveSenderProfile,
+  fetchSenderProfile, saveSenderProfile, fetchSendStats,
 } from './lib/db';
 import { CSS } from './styles';
 
@@ -83,7 +84,7 @@ function ScoreBreakdown({ lead }) {
 // instant, independent of the parent's Supabase round-trips. Resets
 // whenever a different lead is selected, or a full regenerate produces a
 // new generatedAt timestamp.
-function DraftDetail({ lead, generating, sending, onRegenerate, onSendGmail, onMarkSent, onBodyUpdated, copy }) {
+function DraftDetail({ lead, generating, sending, savingDraft, onRegenerate, onSendGmail, onSaveDraft, onMarkSent, onBodyUpdated, copy }) {
   const [bodyText, setBodyText] = useState(lead.draft.body);
   const [selStart, setSelStart] = useState(0);
   const [selEnd, setSelEnd] = useState(0);
@@ -203,6 +204,9 @@ function DraftDetail({ lead, generating, sending, onRegenerate, onSendGmail, onM
             <button className="btn-primary" disabled={sending || dirty} title={dirty ? 'Save your edit before sending' : ''} onClick={() => onSendGmail(lead)}>
               {sending ? <Loader2 className="spin" size={13} /> : <Check size={13} />} Send via Gmail
             </button>
+            <button className="btn-tiny" disabled={savingDraft || dirty} title={dirty ? 'Save your edit first' : 'Creates a draft in your Gmail — nothing is sent'} onClick={() => onSaveDraft(lead)}>
+              {savingDraft ? <Loader2 className="spin" size={12} /> : 'Save as Gmail draft'}
+            </button>
             <button className="btn-tiny" disabled={dirty} title={dirty ? 'Save your edit before sending' : ''} onClick={() => onMarkSent(lead)}>Sent manually — just mark it</button>
           </>
         ) : <span className="tag verified">Sent {lead.outcome.contacted_date}{lead.outcome.sent_via_gmail ? ' (Gmail)' : ''}</span>}
@@ -261,6 +265,7 @@ export default function App() {
           name: profile.name, offer: profile.offer, tone: profile.tone,
           voiceSample: profile.voice_sample, referenceNotes: profile.reference_notes || [],
           testMode: profile.test_mode !== false, testEmail: profile.test_email || '',
+          dailySendCap: profile.daily_send_cap || 30,
         });
         setReferenceUrlsInput((profile.reference_urls || []).join('\n'));
       }
@@ -271,6 +276,16 @@ export default function App() {
   }, []);
 
   useEffect(() => { reload(); }, [reload]);
+
+  // Real outreach sends in the last rolling 24h — powers the safe-send
+  // meter and caps batch sends. Read-only here; the server enforces it.
+  const [sendStats, setSendStats] = useState({ count: 0, lastSentAt: null });
+  const refreshSendStats = useCallback(async () => {
+    try { setSendStats(await fetchSendStats()); }
+    catch (e) { console.warn('Could not load send stats — has supabase/send_safety_schema.sql been run?', e); }
+  }, []);
+  useEffect(() => { refreshSendStats(); }, [refreshSendStats]);
+  useEffect(() => { if (tab === 'drafts') refreshSendStats(); }, [tab, refreshSendStats]);
 
   // Instant local update while typing — no per-keystroke network write.
   const updateSenderField = (patch) => setSender(s => ({ ...s, ...patch }));
@@ -300,6 +315,7 @@ export default function App() {
         reference_notes: referenceNotes,
         test_mode: nextSender.testMode !== false,
         test_email: nextSender.testEmail || '',
+        daily_send_cap: Math.min(100, Math.max(1, Number(nextSender.dailySendCap) || 30)),
       });
       setProfileStatus('Saved.');
     } catch (e) {
@@ -373,6 +389,68 @@ export default function App() {
   };
 
   const [draftError, setDraftError] = useState('');
+
+  // --- Real web-presence enrichment (Serper.dev + free direct-domain
+  // check). Reuses the same scoreLead() the rest of the app uses, so
+  // enriching a lead and its score updating are one atomic action —
+  // never two separate steps that could drift apart.
+  const [enriching, setEnriching] = useState({});
+  const [enrichBatchRunning, setEnrichBatchRunning] = useState(false);
+  const [enrichBatchN, setEnrichBatchN] = useState(20);
+  const [enrichBatchProgress, setEnrichBatchProgress] = useState({ done: 0, total: 0 });
+  const [enrichStatus, setEnrichStatus] = useState('');
+
+  const applyEnrichment = async (lead, result) => {
+    const updatedLead = { ...lead, ...result };
+    const rescored = scoreLead(updatedLead, preferredRegions);
+    const patch = {
+      ...result,
+      need_score: rescored.need_score,
+      reach_score: rescored.reach_score,
+      region_bonus: rescored.region_bonus,
+      priority_score: rescored.priority_score,
+      score_breakdown: rescored.score_breakdown,
+    };
+    await updateLeadScore(lead.id, patch);
+    setLeads(prev => prev.map(l => l.id === lead.id ? { ...l, ...patch } : l));
+  };
+
+  const enrichOneLead = async (lead) => {
+    setEnriching(e => ({ ...e, [lead.id]: true }));
+    try {
+      const result = await enrichLead(lead);
+      await applyEnrichment(lead, result);
+    } catch (e) {
+      alert('Enrichment failed: ' + e.message);
+    } finally {
+      setEnriching(e => ({ ...e, [lead.id]: false }));
+    }
+  };
+
+  const runEnrichBatch = async () => {
+    const candidates = [...leads]
+      .filter(l => !l.website_status || l.website_status === 'Unknown')
+      .sort((a, b) => b.priority_score - a.priority_score)
+      .slice(0, enrichBatchN);
+    if (!candidates.length) { setEnrichStatus('No un-enriched leads found — the top-ranked ones may already be checked.'); return; }
+    setEnrichBatchRunning(true);
+    setEnrichStatus('');
+    setEnrichBatchProgress({ done: 0, total: candidates.length });
+    let failCount = 0, lastError = '';
+    for (let i = 0; i < candidates.length; i++) {
+      const lead = candidates[i];
+      try {
+        const result = await enrichLead(lead);
+        await applyEnrichment(lead, result);
+      } catch (e) {
+        failCount++;
+        lastError = e.message;
+      }
+      setEnrichBatchProgress({ done: i + 1, total: candidates.length });
+    }
+    setEnrichStatus(failCount > 0 ? `Done, with ${failCount} failure(s). Last error: ${lastError}` : `Enriched ${candidates.length} lead${candidates.length === 1 ? '' : 's'}.`);
+    setEnrichBatchRunning(false);
+  };
 
   const runDraft = async (lead) => {
     setGenerating(g => ({ ...g, [lead.id]: true }));
@@ -450,7 +528,7 @@ export default function App() {
     }
   };
   const disableTestMode = () => {
-    if (window.confirm("Turn OFF test mode? \"Send via Gmail\" will start sending REAL emails to leads' real addresses immediately.")) {
+    if (window.confirm("Turn OFF test mode? \"Send via Gmail\" will start sending REAL emails to leads' real addresses immediately. Real sends are limited to your daily safe-send limit, at least 2 minutes apart, and never to the same address twice in 30 days.")) {
       setTestModeAndPersist(false);
     }
   };
@@ -466,12 +544,113 @@ export default function App() {
         setLeads(prev => prev.map(l => l.id === lead.id
           ? { ...l, outcome: { ...l.outcome, contacted: true, contacted_date: new Date().toISOString().slice(0, 10), sent_via_gmail: true, sent_subject: lead.draft.subject, sent_body: lead.draft.body, sent_sources: lead.draft.sources || [] } }
           : l));
+        if (result.counted && result.sendsLast24h != null) setSendStats({ count: result.sendsLast24h, lastSentAt: new Date().toISOString() });
       }
     } catch (e) {
       alert('Send failed: ' + e.message);
+      refreshSendStats(); // the server may have refused because the meter was stale — resync it
     } finally {
       setSending(s => ({ ...s, [lead.id]: false }));
     }
+  };
+
+  const [savingDraft, setSavingDraft] = useState({});
+  const saveAsGmailDraft = async (lead) => {
+    setSavingDraft(s => ({ ...s, [lead.id]: true }));
+    try {
+      await sendViaGmail(lead, { draftOnly: true });
+      alert(`Saved to your Gmail Drafts, addressed to ${lead.draft.sendTo}. Nothing has been sent — open Gmail to review and send it yourself whenever you're ready.`);
+    } catch (e) {
+      alert('Could not save draft: ' + e.message);
+    } finally {
+      setSavingDraft(s => ({ ...s, [lead.id]: false }));
+    }
+  };
+
+  // --- Spaced batch send: sends one at a time with a real delay between
+  // each, so outreach never looks like a bulk blast. Runs entirely in this
+  // browser tab — closing the tab or letting the computer sleep stops it,
+  // which is why it's framed as "keep this tab open," not a background job.
+  const [batchSendRunning, setBatchSendRunning] = useState(false);
+  const [batchSendN, setBatchSendN] = useState(10);
+  const [batchSendDelayMin, setBatchSendDelayMin] = useState(5);
+  const [batchSendProgress, setBatchSendProgress] = useState({ done: 0, total: 0, nextInSeconds: 0 });
+  const [batchSendNote, setBatchSendNote] = useState('');
+  const batchSendStopRef = useRef(false);
+
+  const stopBatchSend = () => { batchSendStopRef.current = true; };
+
+  const MIN_BATCH_GAP_MIN = 3; // the server enforces a 2-minute floor; 3 leaves headroom for timing jitter
+
+  const runBatchSend = async () => {
+    const testMode = sender.testMode !== false;
+    const cap = Math.min(100, Math.max(1, Number(sender.dailySendCap) || 30));
+    // Real sends are capped by what's left of the rolling-24h allowance;
+    // test-mode sends (to yourself) don't count against it.
+    const remaining = testMode ? Infinity : Math.max(0, cap - sendStats.count);
+    setBatchSendNote('');
+    setDraftError('');
+    if (remaining === 0) {
+      setDraftError(`Daily safe-send limit reached (${sendStats.count} of ${cap} real sends in the last 24 hours). Nothing was sent — try again once older sends age out of the 24-hour window.`);
+      return;
+    }
+    const candidates = [...leads]
+      .filter(l => l.draft && !l.outcome?.contacted)
+      .sort((a, b) => b.priority_score - a.priority_score)
+      .slice(0, Math.min(batchSendN, remaining));
+    if (!candidates.length) return;
+    if (!testMode && candidates.length < batchSendN) {
+      setBatchSendNote(`Only ${candidates.length} send${candidates.length === 1 ? '' : 's'} left in today's safe limit, so the batch was trimmed to ${candidates.length}.`);
+    }
+    batchSendStopRef.current = false;
+    setBatchSendRunning(true);
+    setBatchSendProgress({ done: 0, total: candidates.length, nextInSeconds: 0 });
+
+    const gapMs = Math.max(MIN_BATCH_GAP_MIN, batchSendDelayMin) * 60 * 1000;
+    let lastSendAt = null; // spacing is measured from the last email that actually went out
+    let skipped = 0;
+
+    for (let i = 0; i < candidates.length; i++) {
+      if (batchSendStopRef.current) break;
+      const lead = candidates[i];
+
+      if (lastSendAt !== null) {
+        while (!batchSendStopRef.current) {
+          const remainingMs = gapMs - (Date.now() - lastSendAt);
+          if (remainingMs <= 0) break;
+          setBatchSendProgress({ done: i, total: candidates.length, nextInSeconds: Math.ceil(remainingMs / 1000) });
+          await new Promise(r => setTimeout(r, 1000));
+        }
+        if (batchSendStopRef.current) break;
+      }
+
+      try {
+        const result = await sendViaGmail(lead, { testMode, testEmailOverride: sender.testEmail });
+        lastSendAt = Date.now();
+        if (!result.testMode) {
+          setLeads(prev => prev.map(l => l.id === lead.id
+            ? { ...l, outcome: { ...l.outcome, contacted: true, contacted_date: new Date().toISOString().slice(0, 10), sent_via_gmail: true, sent_subject: lead.draft.subject, sent_body: lead.draft.body, sent_sources: lead.draft.sources || [] } }
+            : l));
+          if (result.counted && result.sendsLast24h != null) setSendStats({ count: result.sendsLast24h, lastSentAt: new Date().toISOString() });
+        }
+      } catch (e) {
+        if (e.code === 'duplicate_recipient') {
+          // Not a systemic failure — this one recipient was already emailed
+          // recently. Skip it and carry on; nothing went out, so the
+          // spacing clock keeps running from the last real send.
+          skipped++;
+          setBatchSendProgress({ done: i + 1, total: candidates.length, nextInSeconds: 0 });
+          continue;
+        }
+        console.error(e);
+        setDraftError(`Batch send stopped at "${lead.name}": ${e.message}`);
+        refreshSendStats();
+        break; // cap reached, session problem, Gmail error… don't push on unattended
+      }
+      setBatchSendProgress({ done: i + 1, total: candidates.length, nextInSeconds: 0 });
+    }
+    if (skipped) setBatchSendNote(prev => `${prev ? prev + ' ' : ''}Skipped ${skipped} recipient${skipped === 1 ? '' : 's'} already emailed in the last 30 days.`);
+    setBatchSendRunning(false);
   };
 
   const saveOutcomeRow = async (lead, outcome) => {
@@ -692,6 +871,16 @@ export default function App() {
                   {rescoring ? <><Loader2 className="spin" size={12} /> Re-scoring {rescoreProgress.done}/{rescoreProgress.total}…</> : `Re-score all ${leads.length} saved leads now`}
                 </button>
                 {rescoreStatus && <div className="status-line">{rescoreStatus}</div>}
+
+                <h2 style={{ marginTop: 22 }}>Check real web presence</h2>
+                <p className="hint">A free direct check for custom-domain emails, plus one real search per lead otherwise — updates Website Status and re-scores automatically. Costs a small amount per search (Serper.dev), so batches default small.</p>
+                <div className="row-inline">
+                  <label>Top <input type="number" value={enrichBatchN} onChange={e => setEnrichBatchN(Math.max(1, Number(e.target.value) || 1))} style={{ width: 54 }} disabled={enrichBatchRunning} /> un-checked leads</label>
+                  <button className="btn-tiny" disabled={enrichBatchRunning || !leads.length} onClick={runEnrichBatch}>
+                    {enrichBatchRunning ? <><Loader2 className="spin" size={12} /> {enrichBatchProgress.done}/{enrichBatchProgress.total}…</> : 'Check web presence'}
+                  </button>
+                </div>
+                {enrichStatus && <div className="status-line">{enrichStatus}</div>}
               </div>
 
               <div>
@@ -724,7 +913,7 @@ export default function App() {
                   {filteredSorted.length === 0 ? <Empty title="No leads yet" sub="Upload today's file to get a prioritized list." /> : (
                     <div className="table-wrap">
                       <table>
-                        <thead><tr><th>Score</th><th>Business</th><th>Industry</th><th>Location</th><th>Contact</th><th>Website</th><th></th><th></th></tr></thead>
+                        <thead><tr><th>Score</th><th>Business</th><th>Industry</th><th>Location</th><th>Contact</th><th>Website</th><th></th><th></th><th></th></tr></thead>
                         <tbody>
                           {filteredSorted.slice(uploadPage * PAGE_SIZE, uploadPage * PAGE_SIZE + PAGE_SIZE).map(l => {
                             const c = recommendContact(l);
@@ -739,10 +928,11 @@ export default function App() {
                                   <td className="dim">{l.district}, {l.state}</td>
                                   <td className="mono small">{addr}</td>
                                   <td className="dim">{l.website_status}</td>
+                                  <td><button className="btn-tiny ghost" disabled={enriching[l.id]} onClick={() => enrichOneLead(l)} title="Free direct check or one real search">{enriching[l.id] ? <Loader2 className="spin" size={11} /> : 'Enrich'}</button></td>
                                   <td><button className="btn-tiny ghost" onClick={() => setExpanded(isOpen ? null : l.id)}>{isOpen ? 'Hide' : 'Why?'}</button></td>
                                   <td><button className="btn-tiny" onClick={() => { setSelectedId(l.id); setTab('drafts'); }}>Draft →</button></td>
                                 </tr>
-                                {isOpen && <tr className="expand-row"><td colSpan={8}><ScoreBreakdown lead={l} /></td></tr>}
+                                {isOpen && <tr className="expand-row"><td colSpan={9}><ScoreBreakdown lead={l} /></td></tr>}
                               </React.Fragment>
                             );
                           })}
@@ -772,6 +962,18 @@ export default function App() {
                   </>
                 )}
               </div>
+              {(() => {
+                const cap = Math.min(100, Math.max(1, Number(sender.dailySendCap) || 30));
+                const atLimit = sendStats.count >= cap;
+                return (
+                  <div className={`send-meter ${atLimit ? 'warn' : ''}`}>
+                    Real sends in the last 24h: {sendStats.count} / {cap}
+                    {atLimit ? ' — limit reached, the next slot opens as older sends age out' : ''}
+                    {' · '}min 2 min between sends · same address never twice in 30 days
+                    {sender.testMode !== false ? ' · test sends don\u2019t count' : ''}
+                  </div>
+                );
+              })()}
               <div className="grid-main">
               <div className="card">
                 <h2>Your voice &amp; business</h2>
@@ -790,6 +992,10 @@ export default function App() {
                 </div>
                 <div className="field-row"><label>Test-mode email <span className="opt">(optional — where test sends go instead of your login email)</span></label>
                   <input type="email" value={sender.testEmail || ''} onChange={e => updateSenderField({ testEmail: e.target.value })} placeholder="defaults to your login email if left blank" />
+                </div>
+                <div className="field-row"><label>Daily safe-send limit <span className="opt">(real sends per rolling 24 hours, 1–100 — click Save profile to apply)</span></label>
+                  <input type="number" min="1" max="100" value={sender.dailySendCap ?? 30} onChange={e => updateSenderField({ dailySendCap: Math.min(100, Math.max(1, Number(e.target.value) || 1)) })} style={{ width: 90 }} />
+                  <p className="hint" style={{ marginTop: 6 }}>Gmail itself allows far more, but cold outreach beyond roughly 30–50 a day from one mailbox risks the account being flagged. This is enforced on the server, so a second tab or a refresh can't get around it.</p>
                 </div>
                 <div className="field-row"><label>Sample of your own writing <span className="opt">(optional — paste a past email so drafts sound more like you)</span></label>
                   <textarea value={sender.voiceSample || ''} onChange={e => updateSenderField({ voiceSample: e.target.value })} placeholder="Paste an email you've actually sent before…" />
@@ -823,6 +1029,26 @@ export default function App() {
                 {(!sender.name || !sender.offer) && <div className="status-line">Fill in your details first.</div>}
                 {draftError && <div className="status-line" style={{ color: 'var(--unverified)' }}>{draftError}</div>}
 
+                <h2 style={{ marginTop: 22 }}>Send in batch (spaced)</h2>
+                <p className="hint">Sends one at a time with a real gap in between — never a burst — so it never looks like bulk mail. Runs in this browser tab; keep it open until it finishes.</p>
+                <div className="row-inline">
+                  <label>Top <input type="number" value={batchSendN} onChange={e => setBatchSendN(Math.max(1, Number(e.target.value) || 1))} style={{ width: 54 }} disabled={batchSendRunning} /> drafted, unsent</label>
+                  <label>every <input type="number" value={batchSendDelayMin} onChange={e => setBatchSendDelayMin(Math.max(MIN_BATCH_GAP_MIN, Number(e.target.value) || MIN_BATCH_GAP_MIN))} style={{ width: 54 }} disabled={batchSendRunning} /> min <span className="opt">(3 minimum)</span></label>
+                </div>
+                <div className="row-inline" style={{ marginTop: 8 }}>
+                  {!batchSendRunning ? (
+                    <button className="btn-primary" onClick={runBatchSend}>Start spaced send</button>
+                  ) : (
+                    <>
+                      <span className="status-line" style={{ margin: 0 }}>
+                        Sent {batchSendProgress.done}/{batchSendProgress.total}
+                        {batchSendProgress.nextInSeconds > 0 && ` — next in ${Math.floor(batchSendProgress.nextInSeconds / 60)}:${String(batchSendProgress.nextInSeconds % 60).padStart(2, '0')}`}
+                      </span>
+                      <button className="btn-tiny" onClick={stopBatchSend}>Stop</button>
+                    </>
+                  )}
+                </div>
+                {batchSendNote && <div className="status-line">{batchSendNote}</div>}
                 <h2 style={{ marginTop: 22 }}>Queue</h2>
                 <div className="mini-list">
                   {[...leads].sort((a, b) => b.priority_score - a.priority_score).filter(l => !l.draft).slice(0, 30).map(l => (
@@ -844,8 +1070,10 @@ export default function App() {
                     lead={selectedLead}
                     generating={generating[selectedLead.id]}
                     sending={sending[selectedLead.id]}
+                    savingDraft={savingDraft[selectedLead.id]}
                     onRegenerate={runDraft}
                     onSendGmail={sendNow}
+                    onSaveDraft={saveAsGmailDraft}
                     onMarkSent={markSent}
                     onBodyUpdated={updateDraftBody}
                     copy={copy}

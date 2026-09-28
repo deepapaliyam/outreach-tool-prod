@@ -124,3 +124,17 @@ export async function saveSenderProfile(profile) {
   const { error } = await supabase.from('sender_profiles').upsert(row, { onConflict: 'user_id' });
   if (error) throw error;
 }
+
+// Real outreach sends in the last rolling 24 hours (RLS returns only this
+// user's rows). Read-only from the browser — the send-email function is
+// the only thing that can write to gmail_send_log.
+export async function fetchSendStats() {
+  const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+  const { data, error } = await supabase
+    .from('gmail_send_log')
+    .select('sent_at')
+    .gte('sent_at', since)
+    .order('sent_at', { ascending: false });
+  if (error) throw error;
+  return { count: (data || []).length, lastSentAt: data && data[0] ? data[0].sent_at : null };
+}
