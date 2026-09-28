@@ -117,6 +117,27 @@ tr.row-sel{ background:#E4F0EC; }
 .test-banner.off{ background:#FBE3DC; border:1px solid #E8B4A3; color:var(--unverified); }
 .send-meter{ font-family:var(--mono); font-size:12px; color:var(--ink-soft); margin:-8px 0 16px; }
 .send-meter.warn{ color:var(--unverified); font-weight:700; }
+.two-col{ display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1.5fr); gap:24px; align-items:start; }
+@media (max-width: 900px){ .two-col{ grid-template-columns:1fr; } }
+.webfind{ font-size:13px; padding:12px 14px; }
+.web-h{ font-weight:700; font-size:13px; }
+.web-q{ color:var(--ink-soft); font-size:12px; margin:4px 0 6px; }
+.web-q code{ font-family:var(--mono); font-size:11.5px; background:#EEE9DA; padding:1px 5px; border-radius:4px; }
+.web-sec{ font-family:var(--mono); font-size:10.5px; letter-spacing:.08em; text-transform:uppercase; color:var(--teal-deep); font-weight:700; margin:12px 0 4px; }
+.web-line{ margin:3px 0; line-height:1.45; }
+.web-card{ border:1px solid var(--line); border-radius:8px; padding:9px 11px; margin:5px 0; background:#fff; }
+.web-card.ok{ border-color:#B9D9CC; background:#F1F8F5; }
+.web-card.warn{ border-color:#E8D3B3; background:#FCF6EA; }
+.web-title{ font-weight:700; margin-top:3px; }
+.web-url{ font-family:var(--mono); font-size:11px; color:var(--ink-soft); word-break:break-all; }
+.web-snip{ color:var(--ink-soft); font-size:12px; margin-top:2px; }
+.web-tag{ font-family:var(--mono); font-size:10.5px; font-weight:700; padding:1px 6px; border-radius:4px; background:#EEE9DA; color:var(--ink-soft); }
+.web-tag.ok{ background:#DDEEE7; color:var(--teal-deep); }
+.src-link{ color:var(--teal-deep); text-decoration:underline; text-underline-offset:2px; }
+.check-row{ display:flex; align-items:center; gap:8px; font-size:13px; cursor:pointer; margin-top:6px; }
+.stale-note{ background:#FCF6EA; border:1px solid #E8D3B3; color:#7A5A1E; border-radius:8px; padding:8px 12px; font-size:12.5px; margin:10px 0; }
+.web-details{ margin:12px 0; border:1px solid var(--line); border-radius:8px; background:#fff; }
+.web-details > summary{ cursor:pointer; font-weight:700; font-size:13px; padding:9px 12px; }
 .infopanel{ background:#F1F6F4; border-color:#D6E6E1; }
 .how-grid{ display:grid; grid-template-columns:1fr 1fr 1fr; gap:18px; }
 @media (max-width:720px){ .how-grid{ grid-template-columns:1fr; } }

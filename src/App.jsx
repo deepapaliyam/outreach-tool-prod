@@ -12,7 +12,8 @@ import { sendViaGmail } from './lib/sending';
 import { refineSelection } from './lib/refining';
 import { fetchReferences } from './lib/references';
 import { computeInsightsData } from './lib/insights';
-import { enrichLead } from './lib/enrichment';
+import { enrichLeadWithRetry } from './lib/enrichment';
+import { safeHref, needsWebCheck, draftIsOlderThanWebCheck } from './lib/webcheck';
 import { exportInsightsXLSX, exportInsightsPDF, exportInsightsPPTX, exportInsightsDOCX } from './lib/exports';
 import GmailConnect from './components/GmailConnect';
 import {
@@ -80,11 +81,139 @@ function ScoreBreakdown({ lead }) {
   );
 }
 
+// Results come from Google, so links are only ever rendered as plain
+// http(s) links that open in a new tab.
+function SafeLink({ url, children }) {
+  const href = safeHref(url);
+  return href
+    ? <a className="src-link" href={href} target="_blank" rel="noopener noreferrer">{children} ↗</a>
+    : <span>{children}</span>;
+}
+
+// Shows exactly what the web check found and where — every item links to
+// its source so it can be validated — and is the same evidence the email
+// drafts are grounded in.
+function WebFindings({ lead, onCheck, checking }) {
+  const f = lead.web_findings;
+  const header = (
+    <div className="row-between">
+      <div className="web-h">Web check{lead.web_checked_at && <span className="dim"> · {new Date(lead.web_checked_at).toLocaleString()}</span>}</div>
+      <button className="btn-tiny" disabled={checking} onClick={() => onCheck(lead)}>
+        {checking ? <Loader2 className="spin" size={11} /> : (f ? 'Re-check' : 'Check now')}
+      </button>
+    </div>
+  );
+  if (!f) {
+    const ws = lead.website_status && lead.website_status !== 'Unknown' ? lead.website_status : '';
+    return (
+      <div className="webfind">
+        {header}
+        <p className="hint" style={{ margin: '6px 0 0' }}>
+          Not checked yet.{ws ? ` Current website status is “${ws}”, but no sources were saved for it — check now to see them.` : ''}
+        </p>
+      </div>
+    );
+  }
+  const w = f.website;
+  const confirmed = w && w.confidence === 'confirmed_own_domain';
+  const matched = (f.listings || []).filter(l => l.name_match);
+  const unmatched = (f.listings || []).filter(l => !l.name_match);
+  const d = f.direct;
+  return (
+    <div className="webfind">
+      {header}
+      <div className="web-q">Searched Google for <code>{f.query}</code> · {f.result_count} result{f.result_count === 1 ? '' : 's'}</div>
+
+      <div className="web-sec">Website</div>
+      {d && (
+        <div className="web-line">
+          Company email domain <b>{d.domain}</b>:{' '}
+          {d.state === 'live' && 'responds ✓'}
+          {d.state === 'placeholder' && `answers, but looks like a placeholder page (${d.placeholder_reason})`}
+          {d.state === 'blocked' && `replied “access denied” (HTTP ${d.http_status}), so it couldn't be read`}
+          {d.state === 'unreachable' && "didn't respond"}
+        </div>
+      )}
+      {w ? (
+        <div className={`web-card ${confirmed ? 'ok' : 'warn'}`}>
+          <div>
+            <span className="web-tag">{confirmed ? 'Confirmed — their own email domain' : 'Possible match — not verified'}</span>{' '}
+            <span className="dim">{w.source}</span>
+          </div>
+          <div className="web-title"><SafeLink url={w.url}>{w.title || w.domain}</SafeLink></div>
+          <div className="web-url">{w.url}</div>
+          {w.snippet && <div className="web-snip">{w.snippet}</div>}
+          {!confirmed && <div className="hint" style={{ margin: '6px 0 0' }}>Business names collide often — open it and check it's really them. Emails never state this as a fact.</div>}
+        </div>
+      ) : (
+        <div className="web-line dim">No search result looked like this business's own website.</div>
+      )}
+
+      <div className="web-sec">Listings &amp; directories</div>
+      {matched.length === 0 && unmatched.length === 0 && <div className="web-line dim">None found.</div>}
+      {matched.map((l, i) => (
+        <div className="web-line" key={'m' + i}>
+          <span className="web-tag ok">{l.platform}</span> <SafeLink url={l.url}>{l.title || l.domain}</SafeLink>
+          {l.snippet && <div className="web-snip">{l.snippet}</div>}
+        </div>
+      ))}
+      {unmatched.length > 0 && (
+        <div className="web-line dim">
+          Unmatched — name doesn't match, may be other businesses (not used):{' '}
+          {unmatched.map((l, i) => <span key={'u' + i}>{i > 0 && ', '}<SafeLink url={l.url}>{l.platform}</SafeLink></span>)}
+        </div>
+      )}
+
+      {(f.places || []).length > 0 && (
+        <>
+          <div className="web-sec">Google Business results</div>
+          {f.places.map((p, i) => (
+            <div className="web-line" key={'p' + i}>
+              <span className={`web-tag ${p.name_match ? 'ok' : ''}`}>{p.name_match ? 'Name matches' : 'Name differs'}</span>{' '}
+              <b>{p.title}</b>{p.category ? ` · ${p.category}` : ''}{p.address ? ` · ${p.address}` : ''}
+              {p.rating != null ? ` · ★ ${p.rating}${p.rating_count != null ? ` (${p.rating_count})` : ''}` : ''}
+              {p.website && <> · <SafeLink url={p.website}>website</SafeLink></>}
+            </div>
+          ))}
+        </>
+      )}
+
+      {f.knowledge_panel && (
+        <>
+          <div className="web-sec">Google knowledge panel</div>
+          <div className="web-line"><b>{f.knowledge_panel.title}</b>{f.knowledge_panel.type ? ` · ${f.knowledge_panel.type}` : ''}
+            {f.knowledge_panel.description && <div className="web-snip">{f.knowledge_panel.description}</div>}</div>
+        </>
+      )}
+
+      {(f.other_results || []).length > 0 && (
+        <>
+          <div className="web-sec">Other results <span className="dim">(context only — not used as facts)</span></div>
+          {f.other_results.map((r, i) => (
+            <div className="web-line" key={'o' + i}>
+              <SafeLink url={r.url}>{r.title || r.domain}</SafeLink> <span className="dim">{r.domain}</span>
+              {r.snippet && <div className="web-snip">{r.snippet}</div>}
+            </div>
+          ))}
+        </>
+      )}
+
+      {(f.ignored || []).length > 0 && (
+        <div className="web-line dim" style={{ marginTop: 8 }}>
+          Ignored — company-registration directories, not the business's own site:{' '}
+          {[...new Set(f.ignored.map(x => x.domain))].join(', ')}
+        </div>
+      )}
+      <div className="hint" style={{ margin: '10px 0 0' }}>Email drafts use only confirmed facts and name-matched listings from this check — never “possible” or unmatched items.</div>
+    </div>
+  );
+}
+
 // Owns its own local buffer for the body text so typing/selecting feels
 // instant, independent of the parent's Supabase round-trips. Resets
 // whenever a different lead is selected, or a full regenerate produces a
 // new generatedAt timestamp.
-function DraftDetail({ lead, generating, sending, savingDraft, onRegenerate, onSendGmail, onSaveDraft, onMarkSent, onBodyUpdated, copy }) {
+function DraftDetail({ lead, generating, sending, savingDraft, checking, onRegenerate, onSendGmail, onSaveDraft, onMarkSent, onBodyUpdated, onCheck, copy }) {
   const [bodyText, setBodyText] = useState(lead.draft.body);
   const [selStart, setSelStart] = useState(0);
   const [selEnd, setSelEnd] = useState(0);
@@ -139,6 +268,13 @@ function DraftDetail({ lead, generating, sending, savingDraft, onRegenerate, onS
       <div className="row-between"><div className="biz-name" style={{ fontSize: 17 }}>{lead.name}</div><ScorePill score={lead.priority_score} /></div>
       <div className="dim" style={{ marginBottom: 12 }}>{lead.nic_label} · {lead.district}, {lead.state}</div>
       <ScoreBreakdown lead={lead} />
+      {draftIsOlderThanWebCheck(lead) && !locked && (
+        <div className="stale-note">The web check is newer than this draft — press Regenerate to write it using the latest findings.</div>
+      )}
+      <details className="web-details">
+        <summary>What the web check found{lead.web_findings ? '' : ' — not checked yet'}</summary>
+        <WebFindings lead={lead} onCheck={onCheck} checking={checking} />
+      </details>
       <ul className="evals" style={{ marginTop: 14 }}>{(lead.draft.evaluation || []).map((e, i) => <li key={i}>{e}</li>)}</ul>
 
       {lead.draft.sources && lead.draft.sources.length > 0 && (
@@ -243,6 +379,12 @@ export default function App() {
   const [batchProgress, setBatchProgress] = useState({ done: 0, total: 0 });
   const [outcomeDraft, setOutcomeDraft] = useState({});
   const [expanded, setExpanded] = useState(null);
+  const enrichRunningRef = useRef(false);
+  const enrichStopRef = useRef(false);
+  const autoCheckRef = useRef(null); // always points at the latest runner, so the memoised upload handler never calls a stale one
+  const [autoCheckOnUpload, setAutoCheckOnUpload] = useState(() => {
+    try { return localStorage.getItem('autoCheckOnUpload') !== 'off'; } catch { return true; }
+  });
 
   const preferredRegions = useMemo(
     () => preferredRegionsInput.split(',').map(s => s.trim()).filter(Boolean),
@@ -251,10 +393,12 @@ export default function App() {
 
   // Load leads + outcomes + sender profile from Supabase, merge outcome onto each lead.
   const reload = useCallback(async () => {
+    let merged = [];
     try {
       const [leadRows, outcomeRows] = await Promise.all([fetchLeads(), fetchOutcomes()]);
       const byLead = new Map(outcomeRows.map(o => [o.lead_id, o]));
-      setLeads(leadRows.map(l => ({ ...l, outcome: byLead.get(l.id) || {} })));
+      merged = leadRows.map(l => ({ ...l, outcome: byLead.get(l.id) || {} }));
+      setLeads(merged);
     } catch (e) {
       console.error('Failed to load leads/outcomes:', e);
     }
@@ -273,6 +417,7 @@ export default function App() {
       console.error('Failed to load sender profile — has supabase/sender_profile_schema.sql been run yet?', e);
     }
     setLoaded(true);
+    return merged;
   }, []);
 
   useEffect(() => { reload(); }, [reload]);
@@ -338,7 +483,15 @@ export default function App() {
         const scored = parsed.map(en => scoreLead(en, preferredRegions));
         const { inserted, skipped } = await upsertNewLeads(scored);
         setUploadStatus(`Loaded ${parsed.length} businesses (${rows.length} rows deduped). ${inserted} new, ${skipped} already saved.`);
-        await reload();
+        const fresh = await reload();
+        // Check the leads from THIS file that have never been checked and
+        // have no hand-entered website status — several at once, in the
+        // background, while the list is already usable.
+        const inFile = new Set(parsed.map(p => p.entity_id));
+        const toCheck = (fresh || []).filter(l => inFile.has(l.entity_id) && needsWebCheck(l));
+        if (toCheck.length && autoCheckRef.current && autoCheckRef.current(toCheck)) {
+          setUploadStatus(prev => `${prev} Checking web presence for ${toCheck.length} lead${toCheck.length === 1 ? '' : 's'} in the background…`);
+        }
       } catch (err) {
         console.error(err);
         setUploadStatus('Could not read/save that file — check the columns and that you are signed in.');
@@ -394,17 +547,23 @@ export default function App() {
   // check). Reuses the same scoreLead() the rest of the app uses, so
   // enriching a lead and its score updating are one atomic action —
   // never two separate steps that could drift apart.
-  const [enriching, setEnriching] = useState({});
+  const [enriching, setEnriching] = useState({}); // per-row spinners for single checks
   const [enrichBatchRunning, setEnrichBatchRunning] = useState(false);
   const [enrichBatchN, setEnrichBatchN] = useState(20);
   const [enrichBatchProgress, setEnrichBatchProgress] = useState({ done: 0, total: 0 });
   const [enrichStatus, setEnrichStatus] = useState('');
+  const WEB_CHECK_PARALLEL = 6;
 
+  // Saves the evidence AND the re-computed score together, then updates
+  // the row on screen. Website status feeds the score, so the two are
+  // never written separately.
   const applyEnrichment = async (lead, result) => {
-    const updatedLead = { ...lead, ...result };
-    const rescored = scoreLead(updatedLead, preferredRegions);
+    const rescored = scoreLead({ ...lead, ...result }, preferredRegions);
     const patch = {
-      ...result,
+      website_status: result.website_status,
+      business_listings: result.business_listings,
+      web_findings: result.web_findings,
+      web_checked_at: new Date().toISOString(),
       need_score: rescored.need_score,
       reach_score: rescored.reach_score,
       region_bonus: rescored.region_bonus,
@@ -418,38 +577,68 @@ export default function App() {
   const enrichOneLead = async (lead) => {
     setEnriching(e => ({ ...e, [lead.id]: true }));
     try {
-      const result = await enrichLead(lead);
-      await applyEnrichment(lead, result);
+      await applyEnrichment(lead, await enrichLeadWithRetry(lead));
     } catch (e) {
-      alert('Enrichment failed: ' + e.message);
+      alert('Web check failed: ' + e.message);
     } finally {
       setEnriching(e => ({ ...e, [lead.id]: false }));
     }
   };
 
-  const runEnrichBatch = async () => {
-    const candidates = [...leads]
-      .filter(l => !l.website_status || l.website_status === 'Unknown')
-      .sort((a, b) => b.priority_score - a.priority_score)
-      .slice(0, enrichBatchN);
-    if (!candidates.length) { setEnrichStatus('No un-enriched leads found — the top-ranked ones may already be checked.'); return; }
+  // Checks many leads a few at a time, updating each row the moment its
+  // result arrives. Runs in the background of this tab (keep it open).
+  const runWebChecks = async (candidates) => {
+    if (!candidates.length) return;
+    if (enrichRunningRef.current) {
+      setEnrichStatus('A web check is already running — use the button to check anything left once it finishes.');
+      return;
+    }
+    enrichRunningRef.current = true;
+    enrichStopRef.current = false;
     setEnrichBatchRunning(true);
     setEnrichStatus('');
     setEnrichBatchProgress({ done: 0, total: candidates.length });
-    let failCount = 0, lastError = '';
-    for (let i = 0; i < candidates.length; i++) {
-      const lead = candidates[i];
-      try {
-        const result = await enrichLead(lead);
-        await applyEnrichment(lead, result);
-      } catch (e) {
-        failCount++;
-        lastError = e.message;
+    let next = 0, done = 0, failed = 0, lastError = '';
+    const worker = async () => {
+      while (!enrichStopRef.current) {
+        const i = next++;
+        if (i >= candidates.length) return;
+        try {
+          await applyEnrichment(candidates[i], await enrichLeadWithRetry(candidates[i]));
+        } catch (e) {
+          failed++;
+          lastError = e.message;
+        }
+        done++;
+        setEnrichBatchProgress({ done, total: candidates.length });
       }
-      setEnrichBatchProgress({ done: i + 1, total: candidates.length });
-    }
-    setEnrichStatus(failCount > 0 ? `Done, with ${failCount} failure(s). Last error: ${lastError}` : `Enriched ${candidates.length} lead${candidates.length === 1 ? '' : 's'}.`);
+    };
+    await Promise.all(Array.from({ length: Math.min(WEB_CHECK_PARALLEL, candidates.length) }, worker));
+    const stopped = enrichStopRef.current && done < candidates.length;
+    setEnrichStatus(
+      (stopped ? `Stopped — checked ${done} of ${candidates.length}` : `Checked ${done} lead${done === 1 ? '' : 's'}`) +
+      (failed ? `; ${failed} could not be checked (last error: ${lastError})` : '') + '.'
+    );
+    enrichRunningRef.current = false;
     setEnrichBatchRunning(false);
+  };
+  const stopWebChecks = () => { enrichStopRef.current = true; };
+
+  // Called by the upload handler. Returns whether a background check started.
+  autoCheckRef.current = (toCheck) => {
+    if (!autoCheckOnUpload || enrichRunningRef.current) return false;
+    runWebChecks(toCheck);
+    return true;
+  };
+
+  // Leads never checked (and with no hand-entered status). While any exist
+  // the button says "Check"; once everything is checked it becomes a
+  // deliberate "Re-check" of the top N by score.
+  const uncheckedLeads = useMemo(() => leads.filter(needsWebCheck), [leads]);
+  const runWebCheckButton = () => {
+    const byScore = [...leads].sort((a, b) => b.priority_score - a.priority_score);
+    const pool = uncheckedLeads.length ? byScore.filter(needsWebCheck) : byScore;
+    runWebChecks(pool.slice(0, enrichBatchN));
   };
 
   const runDraft = async (lead) => {
@@ -872,14 +1061,26 @@ export default function App() {
                 </button>
                 {rescoreStatus && <div className="status-line">{rescoreStatus}</div>}
 
-                <h2 style={{ marginTop: 22 }}>Check real web presence</h2>
-                <p className="hint">A free direct check for custom-domain emails, plus one real search per lead otherwise — updates Website Status and re-scores automatically. Costs a small amount per search (Serper.dev), so batches default small.</p>
-                <div className="row-inline">
-                  <label>Top <input type="number" value={enrichBatchN} onChange={e => setEnrichBatchN(Math.max(1, Number(e.target.value) || 1))} style={{ width: 54 }} disabled={enrichBatchRunning} /> un-checked leads</label>
-                  <button className="btn-tiny" disabled={enrichBatchRunning || !leads.length} onClick={runEnrichBatch}>
-                    {enrichBatchRunning ? <><Loader2 className="spin" size={12} /> {enrichBatchProgress.done}/{enrichBatchProgress.total}…</> : 'Check web presence'}
+                <h2 style={{ marginTop: 22 }}>Web presence check</h2>
+                <p className="hint">Runs by itself when you upload a list: a free direct check of the company's email domain plus one Google search per lead, several at a time, updating the list live. Each search costs a fraction of a rupee (Serper.dev). Keep this tab open while it runs.</p>
+                <label className="check-row">
+                  <input type="checkbox" checked={autoCheckOnUpload} onChange={e => {
+                    setAutoCheckOnUpload(e.target.checked);
+                    try { localStorage.setItem('autoCheckOnUpload', e.target.checked ? 'on' : 'off'); } catch { /* preference just won't persist */ }
+                  }} /> Check automatically when I upload a list
+                </label>
+                <div className="row-inline" style={{ marginTop: 8 }}>
+                  <label>Top <input type="number" value={enrichBatchN} onChange={e => setEnrichBatchN(Math.max(1, Number(e.target.value) || 1))} style={{ width: 54 }} disabled={enrichBatchRunning} /> by score</label>
+                  <button className="btn-tiny" disabled={enrichBatchRunning || !leads.length} onClick={runWebCheckButton}>
+                    {enrichBatchRunning
+                      ? <><Loader2 className="spin" size={12} /> {enrichBatchProgress.done}/{enrichBatchProgress.total}…</>
+                      : (uncheckedLeads.length ? `Check web presence (${uncheckedLeads.length} not checked yet)` : 'Re-check web presence')}
                   </button>
+                  {enrichBatchRunning && <button className="btn-tiny" onClick={stopWebChecks}>Stop</button>}
                 </div>
+                {!enrichBatchRunning && uncheckedLeads.length === 0 && leads.length > 0 && (
+                  <p className="hint" style={{ marginTop: 6 }}>Everything is checked. Re-check only if you want fresh results — it replaces the saved findings for the top {enrichBatchN}.</p>
+                )}
                 {enrichStatus && <div className="status-line">{enrichStatus}</div>}
               </div>
 
@@ -927,12 +1128,17 @@ export default function App() {
                                   <td className="dim">{l.nic_label && l.nic_label.length > 28 ? l.nic_label.slice(0, 26) + '…' : l.nic_label}</td>
                                   <td className="dim">{l.district}, {l.state}</td>
                                   <td className="mono small">{addr}</td>
-                                  <td className="dim">{l.website_status}</td>
-                                  <td><button className="btn-tiny ghost" disabled={enriching[l.id]} onClick={() => enrichOneLead(l)} title="Free direct check or one real search">{enriching[l.id] ? <Loader2 className="spin" size={11} /> : 'Enrich'}</button></td>
-                                  <td><button className="btn-tiny ghost" onClick={() => setExpanded(isOpen ? null : l.id)}>{isOpen ? 'Hide' : 'Why?'}</button></td>
+                                  <td className="dim">
+                                    {l.website_status}
+                                    {l.web_findings && l.web_findings.website && (
+                                      <> <SafeLink url={l.web_findings.website.url}>{l.web_findings.website.confidence === 'confirmed_own_domain' ? 'site' : 'possible site'}</SafeLink></>
+                                    )}
+                                  </td>
+                                  <td><button className="btn-tiny ghost" disabled={enriching[l.id]} onClick={() => enrichOneLead(l)} title="Runs the web check for this lead now">{enriching[l.id] ? <Loader2 className="spin" size={11} /> : (l.web_checked_at ? 'Re-check' : 'Check')}</button></td>
+                                  <td><button className="btn-tiny ghost" onClick={() => setExpanded(isOpen ? null : l.id)}>{isOpen ? 'Hide' : 'Details'}</button></td>
                                   <td><button className="btn-tiny" onClick={() => { setSelectedId(l.id); setTab('drafts'); }}>Draft →</button></td>
                                 </tr>
-                                {isOpen && <tr className="expand-row"><td colSpan={9}><ScoreBreakdown lead={l} /></td></tr>}
+                                {isOpen && <tr className="expand-row"><td colSpan={9}><div className="two-col"><ScoreBreakdown lead={l} /><WebFindings lead={l} onCheck={enrichOneLead} checking={enriching[l.id]} /></div></td></tr>}
                               </React.Fragment>
                             );
                           })}
@@ -1071,6 +1277,8 @@ export default function App() {
                     generating={generating[selectedLead.id]}
                     sending={sending[selectedLead.id]}
                     savingDraft={savingDraft[selectedLead.id]}
+                    checking={enriching[selectedLead.id]}
+                    onCheck={enrichOneLead}
                     onRegenerate={runDraft}
                     onSendGmail={sendNow}
                     onSaveDraft={saveAsGmailDraft}

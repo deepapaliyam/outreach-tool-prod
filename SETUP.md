@@ -10,19 +10,24 @@ aren't in the zip, so they stay as they are).
 
 Do these in order. Anything you've already done is harmless to repeat.
 
-1. **SQL** — Supabase → SQL Editor, run (each is safe to re-run):
-   - `supabase/test_mode_schema.sql` *(if you haven't already)*
-   - `supabase/send_safety_schema.sql` **(new — send limits)**
-2. **Secret** — needed for the web-presence check:
-   `npx supabase secrets set SERPER_API_KEY=your-key`
-   (free key with 2,500 searches at serper.dev)
-3. **Deploy the two changed functions:**
+1. **SQL** — Supabase → SQL Editor, run each of these that you haven't
+   yet (every file is safe to re-run):
+   - `supabase/test_mode_schema.sql`
+   - `supabase/send_safety_schema.sql`
+   - `supabase/web_findings_schema.sql` **(new — saves the web-check evidence)**
+2. **Secret** (skip if already set): `npx supabase secrets set SERPER_API_KEY=your-key`
+3. **Deploy the changed functions:**
    ```
-   npx supabase functions deploy send-email
    npx supabase functions deploy enrich-lead
+   npx supabase functions deploy draft
+   npx supabase functions deploy refine-selection
+   npx supabase functions deploy send-email
    ```
-4. **Frontend** — replace the files, then `git add . && git commit -m "Send safety + web enrichment" && git push`. Vercel redeploys on its own.
-5. In the app: Drafts tab → check the **Daily safe-send limit** field and click **Save profile**.
+   (`send-email` only if you haven't deployed the send-safety version yet.)
+4. **Frontend** — replace the files, then
+   `git add . && git commit -m "Web check evidence" && git push`. Vercel redeploys on its own.
+5. In the app, on leads checked by the older version, press **Re-check**
+   once to save their sources (older checks only kept a one-word verdict).
 
 ---
 
@@ -30,7 +35,8 @@ Do these in order. Anything you've already done is harmless to repeat.
 
 1. **Supabase project** → SQL Editor, run in this order:
    `schema.sql` → `gmail_schema.sql` → `snapshot_schema.sql` →
-   `sender_profile_schema.sql` → `test_mode_schema.sql` → `send_safety_schema.sql`
+   `sender_profile_schema.sql` → `test_mode_schema.sql` → `send_safety_schema.sql` →
+   `web_findings_schema.sql`
 2. **Supabase dashboard settings** (one-time, all off by default):
    - Authentication → Providers → **Email** → turn **Confirm email OFF**
      (password sign-up must work without a mail server).
@@ -96,14 +102,37 @@ Do these in order. Anything you've already done is harmless to repeat.
 - If the limits can't be checked (e.g. the SQL wasn't run), real sends
   are **refused**, not allowed through.
 
-## Web-presence check ("Enrich")
+## Web-presence check
 
-Per lead, or for the top N un-checked leads. Custom-domain emails get a
-free direct check; everyone else gets one Serper.dev search (about
-$0.001). Company-registration mirror sites (falconebiz, indiafilings,
-zaubacorp…) are never counted as a website; a search hit is labelled
-**"Possible website found — verify"** because business names collide.
-Results feed the score and the drafts automatically.
+**When it runs.** Automatically when you upload a list (untick "Check
+automatically when I upload a list" to turn that off): every lead from
+that file that has never been checked — and has no website status you
+typed yourself — is checked, six at a time, updating the table live.
+Nothing else is re-checked unless you press **Re-check** (per lead, or
+"Re-check web presence" for the top N by score).
+
+**What it does per lead.** Two things at the same time: (1) for a
+custom-domain company email, a free direct check of that domain (reads
+its page title and description, and spots placeholder / parked pages);
+(2) one Google search via Serper.dev (~$0.001) for the exact business
+name — "Private Limited" removed — plus district and state.
+
+**What you can see (Details → or the Drafts tab).** The search used, the
+website found and why, name-matched listings (Justdial, IndiaMART,
+Facebook…), Google Business results, other results (context only), and
+which company-registration directories were ignored (falconebiz,
+zaubacorp…). Every item links to its source.
+
+**How much it's trusted.** Only a website on the company's **own email
+domain** counts as confirmed. A search hit is labelled "Possible match —
+not verified", because business names collide constantly.
+
+**How drafts use it.** Drafts (and selective rewrites) are handed only
+confirmed facts and name-matched listings. A "possible" site, unmatched
+listings and other results are never passed to the model, and a
+search-based "not found" is never presented as a fact about the business.
+If the web check is newer than a draft, the draft shows a "Regenerate"
+hint.
 
 ## Known limits (worth knowing before you promise anything)
 

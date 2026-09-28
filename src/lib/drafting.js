@@ -1,6 +1,7 @@
 import { recommendContact } from './scoring';
 import { supabase } from './supabase';
 import { functionUrl } from './functionUrl';
+import { buildWebCheckForDraft, websiteStatusForDraft } from './webcheck';
 
 // The browser NEVER calls Anthropic directly (that would expose your API key).
 // It calls your own serverless function, which holds the key.
@@ -28,9 +29,10 @@ export async function generateDraft(lead, sender) {
     entity_type: lead.entity_type,
     industry: lead.nic_label,
     location: [lead.district, lead.state].filter(Boolean).join(', '),
-    website_status: lead.website_status || 'Unknown',
+    website_status: websiteStatusForDraft(lead),
     business_listings_found: lead.business_listings || 'Not checked',
     other_verified_notes: lead.search_notes || 'None',
+    web_check: buildWebCheckForDraft(lead),
     recommended_send_to: sendTo,
     recommended_salutation: salutation,
     sender_name: sender.name || 'Your name',
@@ -50,7 +52,7 @@ export async function generateDraft(lead, sender) {
     },
     body: JSON.stringify(payload),
   });
-  if (!res.ok) throw new Error(`Draft request failed: ${res.status}`);
-  const data = await res.json();
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `Draft request failed: ${res.status}`);
   return { ...data, sendTo }; // { subject, body, evaluation[], generatedAt, sendTo }
 }

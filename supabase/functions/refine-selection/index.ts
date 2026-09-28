@@ -14,6 +14,7 @@ Rules:
 - Rewrite ONLY the snippet. Do not rewrite or return anything else.
 - Your replacement must read naturally in place of the original snippet within the surrounding sentence — match grammar and flow.
 - Stay strictly grounded in the given facts — never invent a new claim, detail, review, or fact that wasn't already given.
+- If the facts include web_check: only web_check.website (present only when it is confirmed to be theirs) and the *_matched_by_name items may be relied on. Never introduce or mention a possible or unconfirmed website, never say the business has no website, and never mention searching or a check.
 - If an instruction is given (e.g. "make it shorter", "less formal", "remove this claim"), follow it. If no instruction is given, just improve clarity and tone while keeping the same core meaning.
 - Output ONLY the replacement text for the snippet. No quotation marks, no explanation, no markdown, nothing else — just the plain replacement text.`;
 
