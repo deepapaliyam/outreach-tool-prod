@@ -162,7 +162,7 @@ export default function UploadPage({ ctl }) {
                           <td>
                             <span className="row" style={{ gap: 4, flexWrap: 'nowrap', whiteSpace: 'nowrap' }}>
                               <button className="btn link sm" onClick={e => { e.stopPropagation(); setSelectedId(l.id); }}>Why?</button>
-                              <button className={`btn sm${sel ? ' primary' : ''}`} onClick={e => { e.stopPropagation(); openDraft(l); }}>Draft</button>
+                              <button className={`btn sm${sel ? ' primary' : ''}`} onClick={e => { e.stopPropagation(); openDraft(l); }}>{l.outcome?.contacted ? 'Sent' : 'Draft'}</button>
                             </span>
                           </td>
                         </tr>

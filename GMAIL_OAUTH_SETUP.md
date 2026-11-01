@@ -62,8 +62,12 @@ sending identity and app registration are entirely theirs.
 While the Google app's publishing status is **Testing**, Google
 automatically expires each saved Gmail permission after **7 days**. Sends
 then fail with *"Your Gmail connection has expired or was revoked"* and the
-Service check shows Gmail in red. The fix for one user is quick:
-**Disconnect Gmail → Connect Gmail**. That is fine for you while testing,
+Service check shows Gmail in red. (An older copy of the `send-email`
+function shows Google's raw words instead — *Could not refresh Google access
+token … "invalid_grant"*. Same cause, same fix; deploying the current functions
+just makes the message clearer.) The fix for one user is quick: on **Email
+Draft**, press **Disconnect Gmail**, then **Connect Gmail to send**, and approve.
+Nothing is lost and nothing was sent while it was broken. That is fine for you while testing,
 but not for a paying client. For a handoff, pick one of these:
 
 - **Client has Google Workspace (a company domain):** create the Google

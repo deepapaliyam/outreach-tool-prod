@@ -190,7 +190,7 @@ export default function WhyPanel({ lead, onCheck, checking, onDraft }) {
       {stale && <div className="note warn mt12">The web check is newer than this lead's draft — regenerate it to use the latest findings.</div>}
 
       <button className="btn primary mt16" style={{ width: '100%' }} onClick={() => onDraft(lead)}>
-        <Sparkles size={15} /> {lead.draft ? 'Open the draft' : `Draft outreach for ${lead.name.split(' ')[0]}`}
+        <Sparkles size={15} /> {lead.outcome?.contacted ? 'View in Sent' : lead.draft ? 'Open the draft' : `Draft outreach for ${lead.name.split(' ')[0]}`}
       </button>
     </div>
   );

@@ -65,6 +65,8 @@ function encodeHeader(value: string): string {
 // --- GUARD START (pure logic, no Deno APIs — unit-tested separately) ---
 const MIN_GAP_SECONDS = 120;
 const DUPLICATE_WINDOW_DAYS = 30;
+const FOLLOWUP_MIN_DAYS = 3;       // wait at least this long after the last email before following up
+const MAX_FOLLOW_UPS = 2;          // per lead - a third nudge is pestering
 const DEFAULT_DAILY_CAP = 30;
 const MAX_DAILY_CAP = 100;
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -87,16 +89,54 @@ interface GuardInput {
   sentLast24h: Array<{ sent_at: string }>;      // real sends in the last 24h, NEWEST first
   priorToSameAddress: { sent_at: string } | null; // most recent real send to this recipient within the duplicate window
   to: string;
+  followUp?: boolean;                           // this email is a follow-up to one already sent to the lead
+  leadOutcome?: LeadOutcome | null;             // the lead's outcome row, when the request names a lead
+  lastLeadSendAt?: string | null;               // newest real send to this lead in the send log (exact time)
+}
+interface LeadOutcome {
+  contacted?: boolean | null;
+  contacted_date?: string | null;               // date (YYYY-MM-DD) of the first email
+  follow_ups?: Array<{ sent_at: string }> | null;
 }
 interface GuardResult {
   allowed: boolean;
   status?: number;
-  code?: 'daily_cap' | 'min_gap' | 'duplicate_recipient';
+  code?: 'daily_cap' | 'min_gap' | 'duplicate_recipient' | 'already_sent' | 'followup_no_original' | 'followup_limit' | 'followup_too_soon';
   error?: string;
+}
+
+// When the lead was last emailed: the newest of the first email's date (a date has no time
+// of day, so it counts from the start of that day), any follow-up, and the send log's exact time.
+function lastTouchMs(o: LeadOutcome, lastSendAt?: string | null): number | null {
+  const times: number[] = [];
+  if (o.contacted_date) {
+    const t = Date.parse(`${String(o.contacted_date).slice(0, 10)}T00:00:00Z`);
+    if (Number.isFinite(t)) times.push(t);
+  }
+  for (const f of o.follow_ups ?? []) {
+    const t = Date.parse(f.sent_at);
+    if (Number.isFinite(t)) times.push(t);
+  }
+  if (lastSendAt) {
+    const t = Date.parse(lastSendAt);
+    if (Number.isFinite(t)) times.push(t);
+  }
+  return times.length ? Math.max(...times) : null;
 }
 
 function evaluateSendGuard(i: GuardInput): GuardResult {
   if (i.exempt) return { allowed: true };
+
+  // 0. A first email to a lead that has already been emailed is refused outright, so a
+  // stale screen or a second browser tab can never send the same lead a second "first" email.
+  // Follow-ups are the only way to write to them again.
+  if (!i.followUp && i.leadOutcome?.contacted) {
+    const when = i.leadOutcome.contacted_date ? ` on ${String(i.leadOutcome.contacted_date).slice(0, 10)}` : '';
+    return {
+      allowed: false, status: 409, code: 'already_sent',
+      error: `This lead was already emailed${when}, so it was skipped. Use the Sent tab if you want to follow up. Nothing was sent.`,
+    };
+  }
 
   // 1. Rolling-24h limit. If the user is at or over the cap, the slot that
   // frees up first belongs to the row at index (cap - 1) in a newest-first
@@ -124,7 +164,36 @@ function evaluateSendGuard(i: GuardInput): GuardResult {
     }
   }
 
-  // 3. Same recipient contacted recently.
+  // 3a. A follow-up: needs an earlier email, a polite wait, and no more than MAX_FOLLOW_UPS.
+  if (i.followUp) {
+    const o = i.leadOutcome;
+    if (!o?.contacted) {
+      return {
+        allowed: false, status: 409, code: 'followup_no_original',
+        error: 'There is no earlier email recorded for this lead, so there is nothing to follow up on. Nothing was sent.',
+      };
+    }
+    const done = (o.follow_ups ?? []).length;
+    if (done >= MAX_FOLLOW_UPS) {
+      return {
+        allowed: false, status: 409, code: 'followup_limit',
+        error: `You have already sent ${done} follow-up${done === 1 ? '' : 's'} to this lead (the limit is ${MAX_FOLLOW_UPS}). A third nudge tends to hurt more than help. Nothing was sent.`,
+      };
+    }
+    const last = lastTouchMs(o, i.lastLeadSendAt);
+    if (last !== null) {
+      const waitDays = Math.ceil((last + FOLLOWUP_MIN_DAYS * DAY_MS - i.now) / DAY_MS);
+      if (waitDays > 0) {
+        return {
+          allowed: false, status: 409, code: 'followup_too_soon',
+          error: `It is too soon to follow up - wait about ${waitDays} more day${waitDays === 1 ? '' : 's'} (at least ${FOLLOWUP_MIN_DAYS} days after the last email). Nothing was sent.`,
+        };
+      }
+    }
+    return { allowed: true };
+  }
+
+  // 3b. Same recipient contacted recently.
   if (i.priorToSameAddress) {
     const when = new Date(i.priorToSameAddress.sent_at).toISOString().slice(0, 10);
     return {
@@ -298,7 +367,10 @@ async function refreshAccessToken(refresh_token: string) {
     if (data?.error === 'invalid_client') {
       throw new GmailAuthError('gmail_client', 'Gmail sign-in is misconfigured on the server (the GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET secrets do not match your Google Cloud client). Nothing was sent.');
     }
-    throw new Error('Could not refresh Google access token: ' + JSON.stringify(data));
+    // Anything else Google says is still a connection problem the user can fix the same way -
+    // never show them a raw JSON blob.
+    const why = typeof data?.error === 'string' ? data.error : (res.ok ? 'no access token returned' : `HTTP ${res.status}`);
+    throw new GmailAuthError('gmail_reconnect', `Google would not renew your Gmail connection (${why}). Click "Disconnect Gmail", then "Connect Gmail" again. Nothing was sent.`);
   }
   return data.access_token as string;
 }
@@ -326,8 +398,11 @@ Deno.serve(async (req) => {
     if (userErr || !userData?.user) return json({ error: 'Invalid session', code: 'session_expired' }, 401);
     const uid = userData.user.id;
 
-    const { leadId, logLeadId, to, subject, body, sources, draftOnly, includeSignature } = await req.json();
+    const { leadId, logLeadId, to, subject, body, sources, draftOnly, includeSignature, followUp: followUpRaw, threadId: threadRaw } = await req.json();
     if (!to || !subject || !body) return json({ error: 'Missing to/subject/body' }, 400);
+    const followUp = followUpRaw === true;
+    // A Gmail thread id is plain letters and digits; anything else is ignored rather than passed on.
+    const threadId = typeof threadRaw === 'string' && /^[A-Za-z0-9]{6,64}$/.test(threadRaw) ? threadRaw : null;
 
     const serviceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
     const admin = createClient(supabaseUrl, serviceKey);
@@ -353,6 +428,8 @@ Deno.serve(async (req) => {
     let cap = DEFAULT_DAILY_CAP;
     let recent: Array<{ sent_at: string }> = [];
     let priorSame: { sent_at: string } | null = null;
+    let leadOutcome: LeadOutcome | null = null;
+    let lastLeadSendAt: string | null = null;
 
     if (!draftOnly) {
       cap = clampCap(profile?.daily_send_cap);
@@ -382,15 +459,47 @@ Deno.serve(async (req) => {
         }
         recent = rows ?? [];
         priorSame = dupRows?.[0] ?? null;
+
+        // Has this lead already been emailed? (A follow-up also needs its follow-up history,
+        // which lives in a column added by v8_schema.sql.)
+        if (leadId) {
+          const { data: oc, error: ocErr } = await admin
+            .from('outcomes')
+            .select(followUp ? 'contacted, contacted_date, follow_ups' : 'contacted, contacted_date')
+            .eq('user_id', uid)
+            .eq('lead_id', leadId)
+            .maybeSingle();
+          if (ocErr) {
+            console.error('outcome lookup failed', ocErr);
+            const hint = followUp ? ' (has supabase/v8_schema.sql been run?)' : '';
+            return json({ error: `Could not check whether this lead was already emailed${hint}. Nothing was sent.`, code: 'lead_lookup_failed' }, 500);
+          }
+          leadOutcome = (oc as LeadOutcome | null) ?? null;
+          if (followUp) {
+            const { data: lastRows } = await admin
+              .from('gmail_send_log')
+              .select('sent_at')
+              .eq('user_id', uid)
+              .eq('lead_id', leadId)
+              .order('sent_at', { ascending: false })
+              .limit(1);
+            lastLeadSendAt = lastRows?.[0]?.sent_at ?? null;
+          }
+        } else if (followUp) {
+          return json({ error: 'A follow-up has to be tied to a lead. Nothing was sent.', code: 'followup_no_original' }, 400);
+        }
       }
     }
 
-    const decision = evaluateSendGuard({ now: Date.now(), exempt, cap, sentLast24h: recent, priorToSameAddress: priorSame, to: toNorm });
+    const decision = evaluateSendGuard({ now: Date.now(), exempt, cap, sentLast24h: recent, priorToSameAddress: priorSame, to: toNorm, followUp, leadOutcome, lastLeadSendAt });
     if (!decision.allowed) return json({ error: decision.error, code: decision.code }, decision.status ?? 429);
 
     // What kind of attempt this is, for the response log.
     const kind = draftOnly ? 'draft' : (exempt ? 'test' : 'send');
-    const base = { user_id: uid, lead_id: leadId ?? logLeadId ?? null, kind, to_address: toNorm, subject: String(subject).slice(0, 300) };
+    const base = {
+      user_id: uid, lead_id: leadId ?? logLeadId ?? null, kind, to_address: toNorm, subject: String(subject).slice(0, 300),
+      ...(followUp ? { purpose: 'followup' } : {}),   // the column exists once v8_schema.sql has run; first emails never need it
+    };
 
     // ---- Build and send (or draft) the message ----
     let accessToken: string;
@@ -413,7 +522,13 @@ Deno.serve(async (req) => {
     const endpoint = draftOnly
       ? 'https://gmail.googleapis.com/gmail/v1/users/me/drafts'
       : 'https://gmail.googleapis.com/gmail/v1/users/me/messages/send';
-    const payload = draftOnly ? { message: { raw } } : { raw };
+    // A follow-up goes into the same Gmail conversation as the first email. (Test sends to
+    // yourself stay out of it.) Without Gmail's read permission the tool cannot see the first
+    // email's Message-ID header, so this groups the two in YOUR Gmail; the recipient's mail
+    // app decides for itself whether to show them as one thread.
+    const useThread = followUp && threadId && (draftOnly || !exempt);
+    const message = useThread ? { raw, threadId } : { raw };
+    const payload = draftOnly ? { message } : message;
 
     let sendRes: Response;
     try {
@@ -462,14 +577,30 @@ Deno.serve(async (req) => {
 
     // Mark the outcome as contacted + sent via Gmail — but never for a
     // draftOnly call, since nothing was actually sent.
+    let followUps: unknown[] | null = null;
     if (leadId && !draftOnly) {
-      await admin.from('outcomes').upsert(
-        { lead_id: leadId, user_id: uid, contacted: true, contacted_date: new Date().toISOString().slice(0, 10), sent_via_gmail: true, sent_subject: subject, sent_body: body, sent_sources: sources || [], updated_at: new Date().toISOString() },
-        { onConflict: 'user_id,lead_id' }
-      );
+      if (followUp) {
+        // The original email stays exactly as it was; the follow-up is added to its history.
+        // (A follow-up to one of your own addresses is just a test, so it records nothing.)
+        if (!exempt) {
+          followUps = [
+            ...(leadOutcome?.follow_ups ?? []),
+            { sent_at: new Date().toISOString(), subject, body, thread_id: gmail.threadId, message_id: gmail.messageId },
+          ];
+          await admin.from('outcomes').upsert(
+            { lead_id: leadId, user_id: uid, follow_ups: followUps, updated_at: new Date().toISOString() },
+            { onConflict: 'user_id,lead_id' }
+          );
+        }
+      } else {
+        await admin.from('outcomes').upsert(
+          { lead_id: leadId, user_id: uid, contacted: true, contacted_date: new Date().toISOString().slice(0, 10), sent_via_gmail: true, sent_subject: subject, sent_body: body, sent_sources: sources || [], updated_at: new Date().toISOString() },
+          { onConflict: 'user_id,lead_id' }
+        );
+      }
     }
 
-    return json({ ok: true, draftOnly: !!draftOnly, kind, gmailMessageId: gmail.messageId, gmail, signatureIncluded: !!signatureHtml, counted: !exempt, sendsLast24h, cap });
+    return json({ ok: true, draftOnly: !!draftOnly, kind, followUp, followUps, gmailMessageId: gmail.messageId, gmail, signatureIncluded: !!signatureHtml, counted: !exempt, sendsLast24h, cap });
   } catch (e) {
     if (e instanceof GmailAuthError) return json({ error: e.message, code: e.code, fatal: true }, 400);
     return json({ error: String(e) }, 500);

@@ -1,5 +1,5 @@
 import React from 'react';
-import { ArrowUpRight, ListFilter, Mail, Columns3, BarChart3, UserCog, ShieldCheck, LogOut } from 'lucide-react';
+import { ArrowUpRight, ListFilter, Mail, Send, Columns3, Handshake, BarChart3, UserCog, ShieldCheck, LogOut } from 'lucide-react';
 import { initialsOf } from '../lib/profile';
 
 // Left navigation, as in the Figma prototype. The Admin entry exists in the
@@ -25,7 +25,9 @@ export default function Sidebar({ tab, setTab, counts, sendMeter, me, profile, i
       <nav className="nav">
         {item('upload', 'Upload & Prioritize', ListFilter, counts.leads)}
         {item('drafts', 'Email Draft', Mail, counts.drafts)}
+        {item('sent', 'Sent', Send, counts.sent)}
         {item('outcomes', 'Track Outcomes', Columns3)}
+        {item('clients', 'Clients', Handshake, counts.clients)}
         {item('insights', 'Insights', BarChart3)}
       </nav>
 

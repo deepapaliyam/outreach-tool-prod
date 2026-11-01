@@ -29,17 +29,20 @@ export function signatureDefault(lead, signatureHtml) {
 // The result carries Gmail's own answer in `gmail`:
 //   { status, messageId, draftId, threadId, labelIds }
 export async function sendViaGmail(lead, options = {}) {
-  const { testMode = false, testEmailOverride = '', draftOnly = false, includeSignature = true } = options;
+  const { testMode = false, testEmailOverride = '', draftOnly = false, includeSignature = true, followUp = false, threadId = null, email = null } = options;
   const { data: { session } } = await supabase.auth.getSession();
   if (!session) throw new Error('Not signed in');
 
-  const realTo = lead.draft.sendTo;
+  // `email` replaces the lead's saved draft - used for follow-ups, which are written separately
+  // and must never overwrite the first email that was saved (and locked) for insights.
+  const mail = email || lead.draft;
+  const realTo = mail.sendTo;
   const redirect = testMode && !draftOnly;
   const to = redirect ? (testEmailOverride || session.user.email) : realTo;
-  const subject = redirect ? `[TEST — would send to ${realTo}] ${lead.draft.subject}` : lead.draft.subject;
+  const subject = redirect ? `[TEST — would send to ${realTo}] ${mail.subject}` : mail.subject;
 
-  // Errors carry err.code ('daily_cap' | 'min_gap' | 'duplicate_recipient' |
-  // 'gmail_reconnect' | ...) so callers can react to each differently.
+  // Errors carry err.code ('daily_cap' | 'min_gap' | 'duplicate_recipient' | 'already_sent' |
+  // 'followup_too_soon' | 'followup_limit' | 'gmail_reconnect' | ...) so callers can react to each differently.
   const data = await callFunction(functionUrl('send-email'), {
     token: session.access_token,
     fallback: 'Send failed',
@@ -48,10 +51,12 @@ export async function sendViaGmail(lead, options = {}) {
       logLeadId: lead.id,
       to,
       subject,
-      body: lead.draft.body,
-      sources: lead.draft.sources || [],
+      body: mail.body,
+      sources: mail.sources || [],
       draftOnly,
       includeSignature: !!includeSignature,
+      followUp: !!followUp,
+      threadId: followUp && threadId ? threadId : undefined,
     },
   });
   return { ...data, testMode: redirect, draftOnly, to, realTo };

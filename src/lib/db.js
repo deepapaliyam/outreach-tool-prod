@@ -164,6 +164,20 @@ export async function fetchGmailResponses(limit = 100) {
   return data ?? [];
 }
 
+// Every email Gmail accepted (real sends and test sends), for the Sent tab and for
+// keeping already-sent leads out of the sending queue. Failures are not included.
+export async function fetchSendHistory(limit = 3000) {
+  const { data, error } = await supabase
+    .from('gmail_responses')
+    .select('*')
+    .eq('ok', true)
+    .in('kind', ['send', 'test'])
+    .order('created_at', { ascending: false })
+    .limit(limit);
+  if (error) throw error;
+  return data ?? [];
+}
+
 // --- SIGNATURE LOGO ----------------------------------------------------------------
 // Uploads to the public signature-assets bucket, inside the user's own folder
 // (the bucket policy refuses anything else). Public because the recipient's mail

@@ -12,11 +12,14 @@
 import 'jsr:@supabase/functions-js/edge-runtime.d.ts';
 import { createClient } from 'jsr:@supabase/supabase-js@2';
 
-const SYSTEM_PROMPT = `You write short, honest, professional B2B cold outreach emails for a freelance web developer / small agency reaching out to Indian small businesses.
+const SENDER_INTRO = `You write short, honest, professional B2B cold outreach emails for a freelance web developer / small agency reaching out to Indian small businesses.
 
 SENDER CONTEXT: sender_name, sender_title, sender_company and sender_business_info describe the person WRITING. You may use them to say who is writing and what they offer, but they are not facts about the lead.
 
-STRICT RULE: use ONLY the facts given in the user message. Never invent a website, review, social detail, or personal fact that wasn't provided. If a field says "Unknown", "Not checked", or "None", omit it rather than guessing. If a voice_profile is given, follow its tone. If reference_notes is given (formatted as one or more "Source: <url>" sections), you may draw on those facts too — when you do, name it in SOURCES as "<claim> — from <the specific url>", not a generic label, so it's clear exactly which reference backed the claim.
+`;
+
+// The facts-only rules every email shares: nothing the model was not given, and the web-check rules.
+const FACT_RULES = `STRICT RULE: use ONLY the facts given in the user message. Never invent a website, review, social detail, or personal fact that wasn't provided. If a field says "Unknown", "Not checked", or "None", omit it rather than guessing. If a voice_profile is given, follow its tone. If reference_notes is given (formatted as one or more "Source: <url>" sections), you may draw on those facts too — when you do, name it in SOURCES as "<claim> — from <the specific url>", not a generic label, so it's clear exactly which reference backed the claim.
 
 WEBSITE FACTS. There are two possible sources. (a) If web_check.checked is true, the website information comes from an automated web check: follow the WEB CHECK RULES below and ignore anything website_status says about whether they have a site. (b) If web_check.checked is false or missing, website_status was entered by the user; if it says no website was found you may reference that honestly.
 
@@ -29,7 +32,9 @@ WEB CHECK RULES (only when web_check.checked is true). The web check is evidence
 - Every fact you use from web_check must appear in SOURCES as \"<claim> — from web check: <url>\" (for a Google Business result with no url write \"from web check: Google Business result\").
 - Write as someone who has looked at the company's public presence. Never mention searching, Google, tools, or a check.
 
-Write four things, in this exact format and nothing else:
+`;
+
+const COLD_FORMAT = `Write four things, in this exact format and nothing else:
 
 EVALUATION:
 - (one line: is this a good-fit lead and why, based only on given facts)
@@ -43,6 +48,83 @@ SUBJECT: (one subject line, under 60 characters, specific and honest, no clickba
 
 BODY:
 (90-130 words. Open with the recommended_salutation given. One genuine, verifiable personalization line drawn only from the facts. One to two sentences of value — no bullet list. One low-pressure call to action. One short line making it easy to opt out. Then close according to signature_mode: if signature_mode is "auto", end with ONLY a short closing phrase such as "Best regards," on its own line — the sender's signature block (name, title, company, links) is added automatically after the email, so write nothing after the closing phrase, not even a name. Otherwise (signature_mode is "in_body" or missing) sign off with sender_name. Plain prose.)`;
+
+const SYSTEM_PROMPT = SENDER_INTRO + FACT_RULES + COLD_FORMAT;
+
+// ---- Follow-up mode ------------------------------------------------------------------------
+// The same facts-only rules, a different job: a short nudge after an earlier email got no answer.
+const FOLLOWUP_INTRO = `You write short, honest, professional FOLLOW-UP emails for a freelance web developer / small agency who emailed an Indian small business a few days ago and has not had a reply.
+
+SENDER CONTEXT: sender_name, sender_title, sender_company and sender_business_info describe the person WRITING. You may use them to say who is writing and what they offer, but they are not facts about the lead.
+
+`;
+
+const FOLLOWUP_FORMAT = `FOLLOW-UP INPUT. previous_email holds the email that was already sent (subject, body, sent_on, days_since). followup_number says whether this is the 1st or 2nd follow-up. live_check_changes (when present) says whether a fresh web check was just run (checked_now), whether it found anything different from before (changed), and what is new (new_findings: plain sentences you may use as facts - cite them in SOURCES as "<claim> - from live check").
+
+FOLLOW-UP RULES.
+- Be brief: 50-90 words. Open with the recommended_salutation given. One line that refers back to the earlier email naturally (for example "I wrote to you on <sent_on> about ..."). Do not repeat the earlier email's pitch word for word.
+- Give ONE reason to read it: either something genuinely new from the facts (only if live_check_changes.new_findings has entries, or the web check gives a fact the earlier email did not use), or the same idea from a fresh, concrete angle. Never invent news, deadlines, scarcity, discounts or "limited slots".
+- Never guilt-trip: no "I haven't heard back", "you must have missed my email", "just checking again", "bumping this".
+- If followup_number is 2 this is the last email: say you will not keep writing, that it is fine if the timing is wrong, and leave the door open in one line.
+- One low-pressure call to action, and one short line making it easy to opt out.
+- SUBJECT must be exactly: "Re: " followed by previous_email.subject (do not add "Re:" twice).
+- Close according to signature_mode: if signature_mode is "auto", end with ONLY a short closing phrase such as "Best regards," on its own line — the sender's signature block is added automatically after the email, so write nothing after it, not even a name. Otherwise sign off with sender_name. Plain prose.
+
+Write four things, in this exact format and nothing else:
+
+EVALUATION:
+- (one line: why a follow-up is reasonable now, based only on given facts)
+- (one line: what is new, or what angle this follow-up takes)
+- (one line: any risk or caveat — if none, say "No specific risk flags from the data provided.")
+
+SOURCES:
+- (one line per factual claim actually used in the body, format: "<short claim> — from <field name>". If the body makes no specific factual claims beyond the earlier email and general language, write "No specific claims beyond general outreach language.")
+
+SUBJECT: (exactly as described above)
+
+BODY:
+(the follow-up email)`;
+
+const FOLLOWUP_PROMPT = FOLLOWUP_INTRO + FACT_RULES + FOLLOWUP_FORMAT;
+
+// ---- Upsell mode -------------------------------------------------------------------------
+// Not an email: ideas for what to offer an existing client next.
+const UPSELL_PROMPT = `You advise a freelance web developer / small agency on what else to offer a business that has ALREADY become a client.
+
+SENDER CONTEXT: sender_name, sender_company, sender_business_info and sender_offer describe the person advising. Only suggest things that plausibly fit what the sender offers; if sender_offer is vague, stay with common web, search and online-presence services.
+
+STRICT RULE: use ONLY the facts given. Never invent facts about the client, their business, their customers, their sales or their results. If a field says "Unknown", "Not checked", or "None", do not guess. client.notes is the sender's own note about the project; treat it as context, not as proof of anything else.
+
+WEB CHECK. If web_check.checked is true, it shows what a public web search found. It is evidence, not proof: names collide. Only use a finding when you can say what it shows ("no Google Business result matched their name"), never as certain fact about the business.
+
+Give 3 to 5 ideas, each one either an UPSELL (a bigger or better version of what they bought) or a CROSS-SELL (a different service). Each must be specific to this client's facts, not a generic list. Do not suggest anything that needs facts you were not given. If client.payment_received is false, say in "timing" to settle the existing payment first.
+
+Reply with ONLY a JSON array, no prose before or after it, no code fences. Each element:
+{"title": "<under 60 characters>", "type": "upsell" | "cross-sell", "why": "<one or two sentences naming the fact it is based on>", "pitch": "<one or two sentences the sender could say to the client, in plain language, no hype>", "timing": "<when to raise it, one short sentence>"}`;
+
+// The model is asked for a bare JSON array. Be forgiving about stray text or fences around it,
+// strict about the contents: only strings, bounded in length, at most 6 ideas.
+function parseIdeas(text: string) {
+  const a = text.indexOf('[');
+  const b = text.lastIndexOf(']');
+  if (a < 0 || b <= a) return null;
+  let raw: unknown;
+  try { raw = JSON.parse(text.slice(a, b + 1)); } catch { return null; }
+  if (!Array.isArray(raw)) return null;
+  const clip = (v: unknown, n: number) => String(v ?? '').replace(/\s+/g, ' ').trim().slice(0, n);
+  const ideas = raw
+    .filter((r) => r && typeof r === 'object')
+    .map((r: any) => ({
+      title: clip(r.title, 80),
+      type: /cross/i.test(String(r.type)) ? 'cross-sell' : 'upsell',
+      why: clip(r.why, 400),
+      pitch: clip(r.pitch, 400),
+      timing: clip(r.timing, 200),
+    }))
+    .filter((r) => r.title && r.why)
+    .slice(0, 6);
+  return ideas.length ? ideas : null;
+}
 
 function parse(text: string) {
   const evalMatch = text.match(/EVALUATION:([\s\S]*?)SOURCES:/i);
@@ -146,6 +228,8 @@ Deno.serve(async (req) => {
     const admin = createClient(supabaseUrl, Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!);
 
     const lead = await req.json();
+    // What to write: a first email (the default, unchanged), a follow-up, or upsell ideas for a client.
+    const mode: 'cold' | 'followup' | 'upsell' = lead?.mode === 'followup' ? 'followup' : lead?.mode === 'upsell' ? 'upsell' : 'cold';
     const key = Deno.env.get('ANTHROPIC_API_KEY');
     if (!key) {
       const message = 'The ANTHROPIC_API_KEY secret is not set in Supabase. Add it with: npx supabase secrets set ANTHROPIC_API_KEY=your-key';
@@ -165,9 +249,9 @@ Deno.serve(async (req) => {
         },
         body: JSON.stringify({
           model,
-          max_tokens: 1000,
-          system: SYSTEM_PROMPT,
-          messages: [{ role: 'user', content: `Lead data:\n${JSON.stringify(lead, null, 2)}` }],
+          max_tokens: mode === 'upsell' ? 1500 : 1000,
+          system: mode === 'followup' ? FOLLOWUP_PROMPT : mode === 'upsell' ? UPSELL_PROMPT : SYSTEM_PROMPT,
+          messages: [{ role: 'user', content: `${mode === 'upsell' ? 'Client' : 'Lead'} data:\n${JSON.stringify(lead, null, 2)}` }],
         }),
       });
     } catch {
@@ -188,7 +272,16 @@ Deno.serve(async (req) => {
       await logEvent(admin, { user_id: uid, source: 'draft', kind: 'error', code: 'empty_draft', message: 'The model returned no text', data: { model } });
       return reply({ code: 'empty_draft', fatal: false, error: 'The AI model returned no text — nothing was saved. Try again.' }, 502);
     }
-    await logEvent(admin, { user_id: uid, source: 'draft', kind: 'usage', code: 'draft', data: { model, input_tokens: data?.usage?.input_tokens ?? null, output_tokens: data?.usage?.output_tokens ?? null } });
+    if (mode === 'upsell') {
+      const ideas = parseIdeas(text);
+      if (!ideas) {
+        await logEvent(admin, { user_id: uid, source: 'draft', kind: 'error', code: 'unreadable_ideas', message: 'The model reply could not be read as a list of ideas', data: { model } });
+        return reply({ code: 'unreadable_ideas', fatal: false, error: 'The AI answered in a form the tool could not read - nothing was saved. Try again.' }, 502);
+      }
+      await logEvent(admin, { user_id: uid, source: 'draft', kind: 'usage', code: 'upsell', data: { model, input_tokens: data?.usage?.input_tokens ?? null, output_tokens: data?.usage?.output_tokens ?? null } });
+      return reply({ ideas, generatedAt: new Date().toISOString() });
+    }
+    await logEvent(admin, { user_id: uid, source: 'draft', kind: 'usage', code: mode === 'followup' ? 'followup' : 'draft', data: { model, input_tokens: data?.usage?.input_tokens ?? null, output_tokens: data?.usage?.output_tokens ?? null } });
     return reply(parse(text));
   } catch (e) {
     return reply({ code: 'server_error', fatal: false, error: String(e) }, 500);

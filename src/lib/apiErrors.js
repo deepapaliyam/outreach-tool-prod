@@ -26,6 +26,15 @@ export function functionError(res, data, fallback) {
   let code = data && typeof data.code === 'string' ? data.code : undefined;
   let fatal = !!(data && data.fatal);
 
+  // An older copy of send-email, still deployed, passes Google's raw refusal straight through
+  // ("Could not refresh Google access token: {"error":"invalid_grant"...}"). Whatever version is
+  // deployed, the person should read what to do, not JSON.
+  if (!code && /invalid_grant|refresh google access token/i.test(adminMessage)) {
+    message = 'Your Gmail connection has expired or was revoked (Google does this every 7 days while the app is in Testing mode). Click "Disconnect Gmail", then "Connect Gmail" again. Nothing was sent.';
+    code = 'gmail_reconnect';
+    fatal = true;
+  }
+
   // Supabase's gateway (not our code) answers 401 when the login has lapsed.
   if (res.status === 401 && !code) {
     message = 'Your sign-in has expired. Sign out and sign in again, then retry.';

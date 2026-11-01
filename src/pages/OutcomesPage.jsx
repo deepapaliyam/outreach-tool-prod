@@ -3,18 +3,13 @@ import { Search, Upload, Download } from 'lucide-react';
 import { PageHeader, StatCard, StatusBadge, Pager, Empty, Spinner, Notice } from '../components/ui';
 import { computeStatus, isClient } from '../lib/scoring';
 import { KIND_LABEL } from '../lib/gmailResponses';
+import { rupee, num } from '../lib/money';
 
 const PAGE_SIZE = 100;
 const REASONS = ['Price too high', 'No response', 'Chose competitor', 'Timing / not ready', 'Other'];
 const CHIPS = [['', 'All leads'], ['none', 'Not contacted'], ['drafted', 'Drafted'], ['contacted', 'Contacted'], ['replied', 'Replied'], ['proposal', 'Proposal sent'], ['won', 'Client'], ['lost', 'Lost'], ['paid', 'Client (paid)']];
 const NEXT = { none: 'Write a draft', drafted: 'Review and send', contacted: 'Wait, then follow up', replied: 'Send a proposal', proposal: 'Follow up on proposal', won: 'Collect payment', paid: 'Project handoff', lost: 'Closed' };
 
-const rupee = (v) => {
-  if (v === '' || v == null) return '—';
-  const n = Number(String(v).replace(/[₹,\s]/g, ''));
-  return Number.isFinite(n) ? `₹${n.toLocaleString('en-IN')}` : String(v);
-};
-const num = (v) => { const n = Number(String(v ?? '').replace(/[₹,\s]/g, '')); return Number.isFinite(n) ? n : 0; };
 const when = (iso) => (iso ? new Date(iso).toLocaleDateString([], { day: 'numeric', month: 'short' }) : '—');
 
 export default function OutcomesPage({ ctl }) {
@@ -59,7 +54,7 @@ export default function OutcomesPage({ ctl }) {
         <StatCard label="Collected revenue" value={rupee(stats.revenue)} brand sub={`Payments received · ${stats.paid} client${stats.paid === 1 ? '' : 's'}`} />
       </div>
 
-      <div className="grid g-main-side mt16" style={{ gridTemplateColumns: 'minmax(0,1fr) 380px' }}>
+      <div className="grid g-wide-side mt16">
         <div className="card flush">
           <div className="card-pad">
             <div className="row">

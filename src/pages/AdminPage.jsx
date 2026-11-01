@@ -13,6 +13,17 @@ const when = (iso) => (iso ? new Date(iso).toLocaleString([], { day: 'numeric', 
 // connection health, error reports, per-user usage and every Gmail response.
 // This page is only ever built for administrators, and every call it makes is
 // refused by the server for anyone else.
+// Admin-only pointers. "Could not reach the server" almost always means the admin function is not
+// deployed yet (the browser's request is refused before it reaches anything); a paused project looks the same.
+function adminHint(error) {
+  const msg = String(error || '');
+  if (/v7_schema/i.test(msg)) return '';
+  if (/could not reach the server/i.test(msg)) {
+    return ' Most often the "admin" function has not been deployed yet — run npm run deploy:functions, then reload. If it is deployed, check that the Supabase project is not paused. (If Supabase answers with a missing-table message instead, run supabase/v7_schema.sql in the SQL Editor.)';
+  }
+  return ' (If this mentions a missing function or table, run supabase/v7_schema.sql in the SQL Editor and deploy the admin function.)';
+}
+
 export default function AdminPage({ ctl }) {
   const { serviceCheckSignal } = ctl;
   const [tab, setTab] = useState(serviceCheckSignal > 0 ? 'service' : 'overview');
@@ -53,7 +64,7 @@ export default function AdminPage({ ctl }) {
         {TABS.map(([id, label]) => <button key={id} role="tab" aria-selected={tab === id} className={tab === id ? 'on' : ''} onClick={() => { setTab(id); setOpen(null); }}>{label}</button>)}
       </div>
 
-      {error && <div style={{ marginBottom: 14 }}><Notice tone="bad">{error}{/v7_schema/i.test(error) ? '' : ' (If this mentions a missing function or table, run supabase/v7_schema.sql in the SQL Editor and deploy the admin function.)'}</Notice></div>}
+      {error && <div style={{ marginBottom: 14 }}><Notice tone="bad">{error}{adminHint(error)}</Notice></div>}
 
       {tab === 'service' && <ServiceCheck runSignal={serviceCheckSignal} />}
 

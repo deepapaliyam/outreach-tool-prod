@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react'
 import * as XLSX from 'xlsx';
 import { Menu } from 'lucide-react';
 
-import { parseWorkbookRows, scoreLead, recommendContact, computeStatus } from './lib/scoring';
+import { parseWorkbookRows, scoreLead, recommendContact, computeStatus, isClient } from './lib/scoring';
 import { generateDraft } from './lib/drafting';
 import { sendViaGmail, sendSignatureTest, signatureDefault } from './lib/sending';
 import { fetchReferences } from './lib/references';
@@ -14,17 +14,25 @@ import { runSequentially, describeBatchResult } from './lib/batch';
 import { setViewerIsAdmin } from './lib/apiErrors';
 import { profileFromRow, rowFromProfile, cleanProfileForSave, profileIsReady, clampCap } from './lib/profile';
 import { latestByLead, shortId } from './lib/gmailResponses';
+import {
+  isSent, indexHistory, mergeLiveSends, buildSentRows, pickBatchSendCandidates, followUpState, summariseRecheck,
+  DEFAULT_RANGE, DEFAULT_NO_RESPONSE_DAYS, RANGES, NO_RESPONSE_CHOICES,
+} from './lib/sent';
+import { generateFollowUp } from './lib/followups';
+import { generateUpsellIdeas } from './lib/upsell';
 import { supabase } from './lib/supabase';
 import {
   fetchLeads, upsertNewLeads, updateLeadDraft, updateLeadScore, bulkUpdateLeadScores,
   fetchOutcomes, saveOutcome, fetchSenderProfile, saveSenderProfile, fetchSendStats,
-  fetchIsAdmin, fetchGmailResponses, uploadSignatureLogo,
+  fetchIsAdmin, fetchGmailResponses, fetchSendHistory, uploadSignatureLogo,
 } from './lib/db';
 import { RETURN_TAB_KEY } from './components/GmailConnect';
 import Sidebar from './components/Sidebar';
 import { Toasts, Spinner } from './components/ui';
 import UploadPage from './pages/UploadPage';
 import DraftPage from './pages/DraftPage';
+import SentPage from './pages/SentPage';
+import ClientsPage from './pages/ClientsPage';
 import OutcomesPage from './pages/OutcomesPage';
 import InsightsPage from './pages/InsightsPage';
 import ProfilePage from './pages/ProfilePage';
@@ -35,10 +43,11 @@ import { CSS } from './styles';
 // carry an `outcome` object assembled from the outcomes table for convenient
 // rendering. Pages are plain components that receive what they need as `ctl`.
 
-const TITLES = { upload: 'Upload & Prioritize', drafts: 'Email Draft', outcomes: 'Track Outcomes', insights: 'Insights', profile: 'Profile & Settings', admin: 'Admin' };
+const TITLES = { upload: 'Upload & Prioritize', drafts: 'Email Draft', sent: 'Sent', outcomes: 'Track Outcomes', clients: 'Clients', insights: 'Insights', profile: 'Profile & Settings', admin: 'Admin' };
 const TABS = Object.keys(TITLES);
 const MIN_BATCH_GAP_MIN = 3; // the server enforces a 2-minute floor; 3 leaves headroom for timing jitter
 const WEB_CHECK_PARALLEL = 6;
+const SERVER_OWNED = ['sent_subject', 'sent_body', 'sent_sources', 'sent_via_gmail', 'follow_ups'];
 
 const readJson = (key, fallback) => { try { const v = JSON.parse(localStorage.getItem(key)); return v ?? fallback; } catch { return fallback; } };
 const writeJson = (key, value) => { try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* the preference just won't persist */ } };
@@ -126,14 +135,20 @@ export default function App() {
   const [gmailLoading, setGmailLoading] = useState(false);
   const [gmailError, setGmailError] = useState('');
   const [liveResponses, setLiveResponses] = useState({});
+  const [sendHistory, setSendHistory] = useState([]);
   const refreshGmail = useCallback(async () => {
     setGmailLoading(true);
-    try { setGmailRows(await fetchGmailResponses(100)); setGmailError(''); }
-    catch (e) { setGmailError(e.message || String(e)); }
-    finally { setGmailLoading(false); }
+    try {
+      try { setGmailRows(await fetchGmailResponses(100)); setGmailError(''); }
+      catch (e) { setGmailError(e.message || String(e)); }
+      // Who has really been emailed, according to Gmail's own answers. Used to keep sent leads out of the queue and the batch.
+      try { setSendHistory(await fetchSendHistory()); }
+      catch (e) { console.warn('Could not load the send history — has supabase/v7_schema.sql been run?', e); }
+    } finally { setGmailLoading(false); }
   }, []);
   useEffect(() => { refreshGmail(); }, [refreshGmail]);
   const latestRows = useMemo(() => latestByLead(gmailRows), [gmailRows]);
+  const sendIndex = useMemo(() => indexHistory(mergeLiveSends(sendHistory, liveResponses)), [sendHistory, liveResponses]);
   const responseFor = useCallback((leadId) => {
     const persisted = rowToResponse(latestRows.get(leadId));
     const live = liveResponses[leadId];
@@ -280,6 +295,7 @@ export default function App() {
     };
     await updateLeadScore(lead.id, patch);
     setLeads(prev => prev.map(l => l.id === lead.id ? { ...l, ...patch } : l));
+    return { ...lead, ...patch };
   };
 
   const enrichOneLead = async (lead) => {
@@ -411,9 +427,9 @@ export default function App() {
     setLeads(prev => prev.map(l => l.id === lead.id ? { ...l, outcome } : l));
   };
 
-  const keepResponse = (lead, result) => {
+  const keepResponse = (lead, result, extra = {}) => {
     const g = result.gmail || {};
-    setLiveResponses(r => ({ ...r, [lead.id]: { ok: true, kind: result.kind || (result.draftOnly ? 'draft' : result.testMode ? 'test' : 'send'), at: new Date().toISOString(), messageId: g.messageId, threadId: g.threadId, labelIds: g.labelIds || [] } }));
+    setLiveResponses(r => ({ ...r, [lead.id]: { ok: true, kind: result.kind || (result.draftOnly ? 'draft' : result.testMode ? 'test' : 'send'), at: new Date().toISOString(), messageId: g.messageId, threadId: g.threadId, labelIds: g.labelIds || [], purpose: extra.followUp ? 'followup' : 'first' } }));
   };
   const markLeadSent = (lead) => setLeads(prev => prev.map(l => l.id === lead.id
     ? { ...l, outcome: { ...l.outcome, contacted: true, contacted_date: today(), sent_via_gmail: true, sent_subject: lead.draft.subject, sent_body: lead.draft.body, sent_sources: lead.draft.sources || [] } }
@@ -480,14 +496,25 @@ export default function App() {
       setDraftError(`Daily safe-send limit reached (${sendStats.count} of ${dailyCap} real sends in the last 24 hours). Nothing was sent — try again once older sends age out of the 24-hour window.`);
       return;
     }
-    const candidates = [...leads]
-      .filter(l => l.draft && !l.outcome?.contacted)
-      .sort((a, b) => b.priority_score - a.priority_score)
-      .slice(0, Math.min(batchSendN, remaining));
-    if (!candidates.length) return;
-    if (!testMode && candidates.length < batchSendN) {
-      setBatchSendNote(`Only ${candidates.length} send${candidates.length === 1 ? '' : 's'} left in today's safe limit, so the batch was trimmed to ${candidates.length}.`);
+    // Only leads that have a draft and have NOT been emailed. Anyone already sent (the lead is marked
+    // contacted, or Gmail confirmed a real send) is left out; in test mode so is anyone who already had a test.
+    // (sendIndex already includes the sends and tests Gmail has just accepted in this session.)
+    const { candidates, skippedSent, skippedTested, available } = pickBatchSendCandidates(leads, sendIndex, { testMode, limit: Math.min(batchSendN, remaining) });
+    const notes = [];
+    if (skippedSent) notes.push(`${skippedSent} lead${skippedSent === 1 ? '' : 's'} already sent ${skippedSent === 1 ? 'was' : 'were'} left out.`);
+    if (skippedTested) notes.push(`${skippedTested} already had a test email, so ${skippedTested === 1 ? 'it was' : 'they were'} left out.`);
+    if (!candidates.length) {
+      setBatchSendNote(skippedSent && !skippedTested
+        ? `Nothing to send — every lead with a draft has already been sent (${skippedSent}). Generate more drafts, or find follow-ups in the Sent tab.`
+        : skippedTested
+          ? 'Nothing to send — every drafted lead has already had a test email. Switch to Real sending to send for real, or generate more drafts.'
+          : 'Nothing to send — no lead has a draft yet. Generate drafts first.');
+      return;
     }
+    if (!testMode && candidates.length < Math.min(batchSendN, available)) {
+      notes.push(`Only ${candidates.length} send${candidates.length === 1 ? '' : 's'} left in today's safe limit, so the batch was trimmed to ${candidates.length}.`);
+    }
+    setBatchSendNote(notes.join(' '));
     batchSendStopRef.current = false;
     setBatchSendRunning(true);
     setBatchSendProgress({ done: 0, total: candidates.length, nextInSeconds: 0 });
@@ -495,6 +522,7 @@ export default function App() {
     const gapMs = Math.max(MIN_BATCH_GAP_MIN, batchSendDelayMin) * 60 * 1000;
     let lastSendAt = null; // spacing is measured from the last email that actually went out
     let skipped = 0;
+    let staleSent = false; // the server knew a lead had been sent when this screen did not
 
     for (let i = 0; i < candidates.length; i++) {
       if (batchSendStopRef.current) break;
@@ -517,9 +545,10 @@ export default function App() {
           if (result.counted && result.sendsLast24h != null) setSendStats({ count: result.sendsLast24h, lastSentAt: new Date().toISOString() });
         }
       } catch (e) {
-        if (e.code === 'duplicate_recipient') {
-          // Not a systemic failure — this recipient was already emailed recently. Skip it
+        if (e.code === 'duplicate_recipient' || e.code === 'already_sent') {
+          // Not a systemic failure — this recipient (or lead) was already emailed. Skip it
           // and carry on; nothing went out, so the spacing clock keeps running.
+          if (e.code === 'already_sent') staleSent = true;
           skipped++;
           setBatchSendProgress({ done: i + 1, total: candidates.length, nextInSeconds: 0 });
           continue;
@@ -531,9 +560,10 @@ export default function App() {
       }
       setBatchSendProgress({ done: i + 1, total: candidates.length, nextInSeconds: 0 });
     }
-    if (skipped) setBatchSendNote(prev => `${prev ? prev + ' ' : ''}Skipped ${skipped} recipient${skipped === 1 ? '' : 's'} already emailed in the last 30 days.`);
+    if (skipped) setBatchSendNote(prev => `${prev ? prev + ' ' : ''}Skipped ${skipped} lead${skipped === 1 ? '' : 's'} that had already been emailed.`);
     setBatchSendRunning(false);
     refreshGmail();
+    if (staleSent) reload(); // bring this screen in line with what the server knows
   };
 
   // ---- outcomes -------------------------------------------------------------------
@@ -549,6 +579,9 @@ export default function App() {
     // reached out first. A bare note or a quoted price alone still does NOT imply contact.
     const impliedContacted = !!(outcome.replied || outcome.proposal_sent || outcome.materialized || outcome.payment_received);
     const merged = { ...outcome, contacted: lead.outcome?.contacted || impliedContacted };
+    // These are written by the send function. The form on screen may hold an older copy (opened before a
+    // follow-up went out), and saving that copy must never wind the email history back.
+    for (const k of SERVER_OWNED) if (lead.outcome && k in lead.outcome) merged[k] = lead.outcome[k];
     setSavingOutcome(true);
     try {
       await saveOutcome(lead.id, merged);
@@ -586,7 +619,138 @@ export default function App() {
     .sort((a, b) => b.priority_score - a.priority_score), [leads, outcomeSearch, outcomeStatusFilter]);
   useEffect(() => { setOutcomePage(0); }, [outcomeSearch, outcomeStatusFilter]);
 
-  const openDraft = (lead) => { setSelectedId(lead.id); setTab('drafts'); };
+  // Someone who has already been emailed is looked after in the Sent tab, not in the sending queue.
+  const openDraft = (lead) => { setSelectedId(lead.id); setTab(isSent(lead) ? 'sent' : 'drafts'); };
+
+  // ---- sent: who has been emailed, follow-ups, quick results ----------------------------------------
+  const [sentRange, setSentRangeState] = useState(() => { const v = readJson('sentRange', DEFAULT_RANGE); return RANGES.some(r => r.id === v) ? v : DEFAULT_RANGE; });
+  const setSentRange = (v) => { setSentRangeState(v); writeJson('sentRange', v); };
+  const [noResponseDays, setNoResponseDaysState] = useState(() => { const v = Number(readJson('noResponseDays', DEFAULT_NO_RESPONSE_DAYS)); return NO_RESPONSE_CHOICES.includes(v) ? v : DEFAULT_NO_RESPONSE_DAYS; });
+  const setNoResponseDays = (v) => { setNoResponseDaysState(v); writeJson('noResponseDays', v); };
+  const sentRows = useMemo(() => buildSentRows(leads, sendIndex, { noResponseDays }), [leads, sendIndex, noResponseDays]);
+
+  // One follow-up in progress per lead: { stage: 'idle'|'checking'|'writing'|'ready', recheck, draft, error }.
+  // Kept here (not inside the page) so switching tabs does not throw away a draft that cost an AI call.
+  const [followUps, setFollowUps] = useState({});
+  const patchFollowUp = (id, patch) => setFollowUps(m => ({ ...m, [id]: { ...(m[id] || {}), ...patch } }));
+  const discardFollowUp = (id) => setFollowUps(m => { const n = { ...m }; delete n[id]; return n; });
+  const editFollowUp = (id, patch) => setFollowUps(m => (m[id] && m[id].draft ? { ...m, [id]: { ...m[id], draft: { ...m[id].draft, ...patch } } } : m));
+
+  // Optionally re-checks the lead's website and listings LIVE first, then writes the follow-up from the fresh findings.
+  const startFollowUp = async (facts, { recheck, rewrite = false }) => {
+    const lead = facts.lead;
+    const state = followUpState(facts);
+    if (!state.ok) { patchFollowUp(lead.id, { stage: 'idle', error: state.reason }); return; }
+    // A rewrite writes again from the findings already in hand (the lead on screen is already up to date).
+    const earlier = rewrite && followUps[lead.id] ? followUps[lead.id].recheck || null : null;
+    patchFollowUp(lead.id, { stage: recheck ? 'checking' : 'writing', error: '', draft: null, ...(rewrite ? {} : { recheck: null }) });
+    let working = lead;
+    let summary = earlier;
+    if (recheck) {
+      try {
+        working = await applyEnrichment(lead, await enrichLeadWithRetry(lead));
+        summary = summariseRecheck(lead, working);
+        patchFollowUp(lead.id, { stage: 'writing', recheck: summary });
+      } catch (e) {
+        flagSetupProblem(e);
+        patchFollowUp(lead.id, { stage: 'idle', error: `The live website check failed: ${e.message} You can untick “Check their website first” to write the follow-up without it.` });
+        return;
+      }
+    }
+    try {
+      const draft = await generateFollowUp(working, sender, { facts: { ...facts, lead: working }, number: state.number, recheck: summary });
+      patchFollowUp(lead.id, { stage: 'ready', draft });
+    } catch (e) {
+      flagSetupProblem(e);
+      patchFollowUp(lead.id, { stage: 'idle', error: `Could not write the follow-up: ${e.message}` });
+    }
+  };
+
+  const followUpMail = (id) => {
+    const d = followUps[id] && followUps[id].draft;
+    return d ? { sendTo: d.sendTo, subject: d.subject, body: d.body, sources: d.sources || [] } : null;
+  };
+
+  const sendFollowUp = async (facts, opts = {}) => {
+    const lead = facts.lead;
+    const email = followUpMail(lead.id);
+    if (!email) return;
+    setSending(s => ({ ...s, [lead.id]: true }));
+    try {
+      const asTest = !!opts.forceTest || testMode;
+      const result = await sendViaGmail(lead, { testMode: asTest, testEmailOverride: sender.testEmail, includeSignature: opts.includeSignature !== false, followUp: true, threadId: facts.threadId, email });
+      keepResponse(lead, result, { followUp: true });
+      if (result.testMode) {
+        notify({ tone: 'ok', title: `Test follow-up sent to ${result.to}`, text: `Gmail accepted it. ${lead.name}'s history was NOT changed — no follow-up is recorded.` });
+      } else {
+        const added = { sent_at: new Date().toISOString(), subject: email.subject, body: email.body, thread_id: result.gmail?.threadId || null, message_id: result.gmail?.messageId || null };
+        setLeads(prev => prev.map(l => l.id === lead.id ? { ...l, outcome: { ...l.outcome, follow_ups: result.followUps || [...(l.outcome?.follow_ups || []), added] } } : l));
+        if (result.counted && result.sendsLast24h != null) setSendStats({ count: result.sendsLast24h, lastSentAt: new Date().toISOString() });
+        discardFollowUp(lead.id);
+        notify({ tone: 'ok', title: `Follow-up sent to ${result.to}`, text: `Gmail accepted it (message ${shortId(result.gmail?.messageId) || 'ID not returned'}).` });
+      }
+    } catch (e) {
+      notify({ tone: 'bad', title: 'Follow-up not sent', text: e.message });
+      refreshSendStats();
+      // The server knows the true follow-up history; if it disagreed with this screen, show what it knows.
+      if (/^followup_/.test(e.code || '')) reload();
+    } finally {
+      setSending(s => ({ ...s, [lead.id]: false }));
+      refreshGmail();
+    }
+  };
+
+  const saveFollowUpAsGmailDraft = async (facts, opts = {}) => {
+    const lead = facts.lead;
+    const email = followUpMail(lead.id);
+    if (!email) return;
+    setSavingDraft(s => ({ ...s, [lead.id]: true }));
+    try {
+      const result = await sendViaGmail(lead, { draftOnly: true, includeSignature: opts.includeSignature !== false, followUp: true, threadId: facts.threadId, email });
+      keepResponse(lead, result, { followUp: true });
+      notify({ tone: 'ok', title: 'Follow-up saved to your Gmail Drafts', text: `Addressed to ${email.sendTo}. Nothing has been sent — open Gmail to review and send it yourself.` });
+    } catch (e) {
+      notify({ tone: 'bad', title: 'Could not save the draft', text: e.message });
+    } finally {
+      setSavingDraft(s => ({ ...s, [lead.id]: false }));
+      refreshGmail();
+    }
+  };
+
+  // Log what happened to someone already emailed, without leaving the Sent tab. Only the fields
+  // that change are written, so nothing else in the record can be overwritten by a stale screen.
+  const quickOutcome = async (lead, patch, message) => {
+    try {
+      await saveOutcome(lead.id, patch);
+      setLeads(prev => prev.map(l => l.id === lead.id ? { ...l, outcome: { ...l.outcome, ...patch } } : l));
+      notify({ tone: 'ok', title: message || 'Saved', text: lead.name });
+    } catch (e) {
+      notify({ tone: 'bad', title: 'Could not save', text: e.message });
+    }
+  };
+
+  // ---- clients: upsell / cross-sell ideas -----------------------------------------------------------------
+  const clients = useMemo(() => leads.filter(isClient), [leads]);
+  const [upsellBusy, setUpsellBusy] = useState({});
+  const [liveIdeas, setLiveIdeas] = useState({});
+  const suggestUpsell = async (lead) => {
+    setUpsellBusy(b => ({ ...b, [lead.id]: true }));
+    try {
+      const { ideas, generatedAt } = await generateUpsellIdeas(lead, sender);
+      setLiveIdeas(m => ({ ...m, [lead.id]: { ideas, at: generatedAt } }));
+      try {
+        await saveOutcome(lead.id, { upsell_ideas: ideas, upsell_at: generatedAt });
+        setLeads(prev => prev.map(l => l.id === lead.id ? { ...l, outcome: { ...l.outcome, upsell_ideas: ideas, upsell_at: generatedAt } } : l));
+      } catch (e) {
+        notify({ tone: 'warn', title: 'Ideas ready, but not saved', text: `They are shown below for now. ${e.message} (Has supabase/v8_schema.sql been run?)` });
+      }
+    } catch (e) {
+      notify({ tone: 'bad', title: 'Could not get ideas', text: e.message });
+      flagSetupProblem(e);
+    } finally {
+      setUpsellBusy(b => ({ ...b, [lead.id]: false }));
+    }
+  };
 
   // ---- exports ----------------------------------------------------------------------
   const exportCSV = () => {
@@ -676,7 +840,7 @@ export default function App() {
             sent_subject: lead.outcome?.sent_subject, sent_body: lead.outcome?.sent_body, sent_sources: lead.outcome?.sent_sources,
           };
           await saveOutcome(lead.id, outcome);
-          setLeads(prev => prev.map(l => l.id === lead.id ? { ...l, outcome } : l));
+          setLeads(prev => prev.map(l => l.id === lead.id ? { ...l, outcome: { ...l.outcome, ...outcome } } : l));
           updated++;
         }
         setImportStatus(`Updated ${updated} lead${updated === 1 ? '' : 's'}.${noMatch ? ` ${noMatch} row(s) had no matching Entity ID.` : ''}`);
@@ -724,6 +888,11 @@ export default function App() {
     sending, savingDraft, sendNow, saveAsGmailDraft, markSent, updateDraftBody, sendStats, enableTestMode, disableTestMode,
     batchSendN, setBatchSendN, batchSendDelayMin, setBatchSendDelayMin, MIN_BATCH_GAP_MIN, batchSendRunning, batchSendProgress, batchSendNote, runBatchSend, stopBatchSend,
     responseFor, gmailRows, gmailLoading, gmailError, refreshGmail,
+    // sent
+    sentRows, sentRange, setSentRange, noResponseDays, setNoResponseDays, followUps, startFollowUp, editFollowUp, discardFollowUp,
+    sendFollowUp, saveFollowUpAsGmailDraft, quickOutcome,
+    // clients
+    clients, suggestUpsell, upsellBusy, liveIdeas,
     // outcomes
     outcomeTabLeads, outcomeSearch, setOutcomeSearch, outcomeStatusFilter, setOutcomeStatusFilter, outcomePage, setOutcomePage,
     outcomeDraft, setOutcomeDraft, saveOutcomeRow, savingOutcome, handleImportOutcomes, importing, importStatus,
@@ -735,7 +904,12 @@ export default function App() {
     serviceCheckSignal,
   };
 
-  const counts = { leads: leads.length || null, drafts: leads.filter(l => l.draft).length || null };
+  const counts = {
+    leads: leads.length || null,
+    drafts: leads.filter(l => l.draft && !isSent(l)).length || null,
+    sent: sentRows.length || null,
+    clients: clients.length || null,
+  };
 
   return (
     <div className="app">
@@ -757,7 +931,9 @@ export default function App() {
             <>
               {tab === 'upload' && <UploadPage ctl={ctl} />}
               {tab === 'drafts' && <DraftPage ctl={ctl} />}
+              {tab === 'sent' && <SentPage ctl={ctl} />}
               {tab === 'outcomes' && <OutcomesPage ctl={ctl} />}
+              {tab === 'clients' && <ClientsPage ctl={ctl} />}
               {tab === 'insights' && <InsightsPage ctl={ctl} />}
               {tab === 'profile' && <ProfilePage ctl={ctl} />}
               {tab === 'admin' && isAdmin && <AdminPage ctl={ctl} />}
