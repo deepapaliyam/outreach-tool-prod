@@ -34,6 +34,48 @@ function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
 }
 
+// --- SERPER ERR START (identical in enrich-lead and health-check) ---
+// Plain-language mapping of a Serper.dev failure. `fatal` = a setup problem
+// (bad key / out of credits) that retrying or checking more leads cannot
+// fix; those use HTTP 400 so clients do not retry them. `operator` = only the
+// administrator can fix it, so ordinary users see USER_SAFE_SEARCH instead.
+type SearchProblem = { code: string; fatal: boolean; operator: boolean; status: number; error: string };
+const USER_SAFE_SEARCH = 'The web-check service is unavailable right now. The problem has been recorded for your administrator.';
+function classifySerperFailure(status: number, data: any): SearchProblem {
+  const msg = String(data?.message || data?.error || '').toLowerCase();
+  if (msg.includes('credit')) {
+    return { code: 'serper_credit', fatal: true, operator: true, status: 400, error: 'Your Serper search credits have run out. Top up at serper.dev, then try again.' };
+  }
+  if (status === 401 || status === 403) {
+    return { code: 'serper_key_invalid', fatal: true, operator: true, status: 400, error: 'Serper rejected the API key. Check the SERPER_API_KEY secret in Supabase and your account at serper.dev.' };
+  }
+  if (status === 429) {
+    return { code: 'serper_busy', fatal: false, operator: false, status: 429, error: 'Search rate limit reached — retrying shortly.' };
+  }
+  return { code: 'serper_error', fatal: false, operator: false, status: 502, error: `Search failed (${status}).` };
+}
+// --- SERPER ERR END ---
+
+// --- LOG START (identical in every function that records events) ---
+// Best-effort write to the admin event log (public.app_events). It must never
+// break the request it is describing, so every failure is swallowed.
+async function logEvent(admin: any, e: { user_id?: string | null; source: string; kind: string; code?: string | null; message?: string | null; data?: Record<string, unknown> }) {
+  try {
+    const { error } = await admin.from('app_events').insert({
+      user_id: e.user_id ?? null,
+      source: e.source,
+      kind: e.kind,
+      code: e.code ?? null,
+      message: e.message ? String(e.message).slice(0, 1000) : null,
+      data: e.data ?? {},
+    });
+    if (error) console.error('logEvent failed:', error.message);
+  } catch (err) {
+    console.error('logEvent threw:', String(err));
+  }
+}
+// --- LOG END ---
+
 // --- PURE START (no Deno APIs — unit-tested separately) ---
 const FREEMAIL = new Set(['gmail.com', 'yahoo.com', 'yahoo.in', 'yahoo.co.in', 'outlook.com', 'rediffmail.com', 'hotmail.com', 'icloud.com', 'live.com', 'protonmail.com']);
 
@@ -289,11 +331,18 @@ Deno.serve(async (req) => {
     const { data: userData, error: userErr } = await authed.auth.getUser(jwt);
     if (userErr || !userData?.user) return json({ error: 'Invalid session' }, 401);
 
+    const uid = userData.user.id;
+    const admin = createClient(supabaseUrl, Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!);
+
     const { name, district, state, companyEmail } = await req.json();
     if (!name) return json({ error: 'Missing business name' }, 400);
 
     const apiKey = Deno.env.get('SERPER_API_KEY');
-    if (!apiKey) return json({ error: 'Missing SERPER_API_KEY secret' }, 500);
+    if (!apiKey) {
+      const message = 'The SERPER_API_KEY secret is not set in Supabase. Add it with: npx supabase secrets set SERPER_API_KEY=your-key';
+      await logEvent(admin, { user_id: uid, source: 'enrich-lead', kind: 'error', code: 'serper_key_missing', message });
+      return json({ code: 'serper_key_missing', fatal: true, error: message, user_error: USER_SAFE_SEARCH }, 400);
+    }
 
     const domain = companyEmail && String(companyEmail).includes('@')
       ? String(companyEmail).split('@').pop()!.toLowerCase().trim() : null;
@@ -307,10 +356,15 @@ Deno.serve(async (req) => {
     ]);
 
     if (!search.ok) {
-      if (search.status === 429) return json({ error: 'Search rate limit reached — retrying shortly.' }, 429);
-      if (search.status === 401 || search.status === 403) return json({ error: 'Serper rejected the API key — check the SERPER_API_KEY secret and your Serper credits.' }, 400);
-      return json({ error: `Search failed (${search.status}).` }, 502);
+      const problem = classifySerperFailure(search.status, search.data);
+      console.error('enrich-lead: Serper returned', search.status, search.data?.message);
+      // Rate limits are routine and retried by the browser, so only real problems are logged.
+      if (problem.code !== 'serper_busy') {
+        await logEvent(admin, { user_id: uid, source: 'enrich-lead', kind: 'error', code: problem.code, message: problem.error, data: { http_status: search.status, serper_message: search.data?.message ?? null } });
+      }
+      return json({ code: problem.code, fatal: problem.fatal, error: problem.error, user_error: problem.operator ? USER_SAFE_SEARCH : undefined }, problem.status);
     }
+    await logEvent(admin, { user_id: uid, source: 'enrich-lead', kind: 'usage', code: 'search', data: { provider: 'serper' } });
 
     return json(assemble(name, query, direct, analyzeSearch(name, search.data), new Date().toISOString()));
   } catch (e) {

@@ -138,3 +138,60 @@ export async function fetchSendStats() {
   if (error) throw error;
   return { count: (data || []).length, lastSentAt: data && data[0] ? data[0].sent_at : null };
 }
+
+// --- ADMIN FLAG --------------------------------------------------------------
+// A user can read only their OWN row of app_admins (row-level security), so
+// this answers "am I an administrator?" and nothing more. If the table does
+// not exist yet (v7_schema.sql not run) the answer is simply "no".
+export async function fetchIsAdmin() {
+  try {
+    const { data, error } = await supabase.from('app_admins').select('user_id').maybeSingle();
+    if (error) return false;
+    return !!data;
+  } catch {
+    return false;
+  }
+}
+
+// --- GMAIL RESPONSES (own rows only) ---------------------------------------------
+export async function fetchGmailResponses(limit = 100) {
+  const { data, error } = await supabase
+    .from('gmail_responses')
+    .select('*')
+    .order('created_at', { ascending: false })
+    .limit(limit);
+  if (error) throw error;
+  return data ?? [];
+}
+
+// --- SIGNATURE LOGO ----------------------------------------------------------------
+// Uploads to the public signature-assets bucket, inside the user's own folder
+// (the bucket policy refuses anything else). Public because the recipient's mail
+// app has to be able to load the picture.
+export const LOGO_TYPES = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp' };
+export const LOGO_MAX_BYTES = 512 * 1024;
+
+export function checkLogoFile(file) {
+  if (!file) return 'Choose an image first.';
+  if (!LOGO_TYPES[file.type]) return 'Use a PNG, JPG, GIF or WebP image.';
+  if (file.size > LOGO_MAX_BYTES) return `That image is ${Math.round(file.size / 1024)} KB. Please use one under 512 KB (a logo around 400 px wide is plenty).`;
+  return '';
+}
+
+export async function uploadSignatureLogo(file) {
+  const problem = checkLogoFile(file);
+  if (problem) throw new Error(problem);
+  const userId = await currentUserId();
+  if (!userId) throw new Error('Not signed in');
+  const rand = Math.random().toString(36).slice(2, 10);
+  const path = `${userId}/${Date.now()}-${rand}.${LOGO_TYPES[file.type]}`;
+  const { error } = await supabase.storage.from('signature-assets').upload(path, file, {
+    contentType: file.type, cacheControl: '31536000', upsert: false,
+  });
+  if (error) {
+    const hint = /bucket.*not found/i.test(error.message) ? ' (Has supabase/v7_schema.sql been run?)' : '';
+    throw new Error('Could not upload the logo: ' + error.message + hint);
+  }
+  const { data } = supabase.storage.from('signature-assets').getPublicUrl(path);
+  return data.publicUrl;
+}

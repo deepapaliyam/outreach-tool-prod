@@ -1,5 +1,6 @@
 import { supabase } from './supabase';
 import { functionUrl } from './functionUrl';
+import { callFunction } from './apiErrors';
 import { buildWebCheckForDraft, websiteStatusForDraft } from './webcheck';
 
 // Rewrites just one selected snippet of a draft body via the
@@ -19,20 +20,15 @@ export async function refineSelection({ fullBody, selectedText, instruction, lea
     web_check: buildWebCheckForDraft(lead),
   };
 
-  const res = await fetch(functionUrl('refine-selection'), {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${session.access_token}`,
-    },
-    body: JSON.stringify({
+  const data = await callFunction(functionUrl('refine-selection'), {
+    token: session.access_token,
+    fallback: 'Rewrite failed',
+    body: {
       full_body: fullBody,
       selected_text: selectedText,
       instruction: instruction || '',
       lead_context: leadContext,
-    }),
+    },
   });
-  const data = await res.json();
-  if (!res.ok) throw new Error(data.error || 'Rewrite failed');
   return data.replacement;
 }

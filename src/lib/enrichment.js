@@ -1,5 +1,6 @@
 import { supabase } from './supabase';
 import { functionUrl } from './functionUrl';
+import { callFunction } from './apiErrors';
 
 // Calls enrich-lead, which checks the lead's company-email domain (free)
 // and runs one Google search at the same time, and returns the evidence:
@@ -11,26 +12,16 @@ export async function enrichLead(lead) {
   const { data: { session } } = await supabase.auth.getSession();
   if (!session) throw new Error('Not signed in');
 
-  const res = await fetch(functionUrl('enrich-lead'), {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${session.access_token}`,
-    },
-    body: JSON.stringify({
+  return callFunction(functionUrl('enrich-lead'), {
+    token: session.access_token,
+    fallback: 'Web check failed',
+    body: {
       name: lead.name,
       district: lead.district,
       state: lead.state,
       companyEmail: lead.company_email,
-    }),
+    },
   });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    const err = new Error(data.error || `Web check failed (${res.status})`);
-    err.status = res.status;
-    throw err;
-  }
-  return data;
 }
 
 // Several leads are checked in parallel, so a burst can hit the search
@@ -45,7 +36,7 @@ export async function enrichLeadWithRetry(lead, attempts = 3) {
       return await enrichLead(lead);
     } catch (e) {
       lastErr = e;
-      const retryable = e.status === 429 || e.status >= 500 || e.name === 'TypeError';
+      const retryable = !e.fatal && (e.status === 429 || e.status >= 500 || e.network || e.name === 'TypeError');
       if (!retryable || i === attempts - 1) break;
       await new Promise(r => setTimeout(r, 1500 * (i + 1) * (i + 1)));
     }

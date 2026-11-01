@@ -41,7 +41,7 @@ screen" wizard is now **Google Auth Platform** with separate sections
 
 ## C. Connecting inside the app
 
-10. Drafts tab → **Connect Gmail to send** → approve on Google's screen.
+10. **Email Draft** tab → **Connect Gmail to send** → approve on Google's screen.
     It will say the app is "unverified" — expected in Testing mode
     (Advanced → continue). Check the consent screen lists sending email
     on your behalf before approving.
@@ -56,3 +56,28 @@ screen" wizard is now **Google Auth Platform** with separate sections
 For a dedicated deployment, create the Google Cloud project under the
 client's own Google account and use their Client ID/secret, so their
 sending identity and app registration are entirely theirs.
+
+## "Gmail stopped working after a week" (the 7-day expiry)
+
+While the Google app's publishing status is **Testing**, Google
+automatically expires each saved Gmail permission after **7 days**. Sends
+then fail with *"Your Gmail connection has expired or was revoked"* and the
+Service check shows Gmail in red. The fix for one user is quick:
+**Disconnect Gmail → Connect Gmail**. That is fine for you while testing,
+but not for a paying client. For a handoff, pick one of these:
+
+- **Client has Google Workspace (a company domain):** create the Google
+  Cloud project inside their Workspace and set the Audience to
+  **Internal**. Internal apps are not subject to the 7-day limit and need
+  no verification.
+- **Client uses ordinary Gmail:** in Google Auth Platform → Audience, move
+  the app from *Testing* to **In production**. This removes the 7-day
+  limit. Google may require its verification process for the
+  `gmail.send` scope (it needs a privacy-policy page and a homepage);
+  until verified, the consent screen still shows the "unverified" warning
+  and the app is limited to 100 users — more than enough for one client.
+  Check Google's current verification requirements before you promise a
+  date, as they change.
+
+Whichever you choose, do it **before** the client's go-live, then connect
+their Gmail once from the finished setup.

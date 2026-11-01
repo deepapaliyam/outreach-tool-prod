@@ -1,7 +1,9 @@
 import { recommendContact } from './scoring';
 import { supabase } from './supabase';
 import { functionUrl } from './functionUrl';
+import { callFunction } from './apiErrors';
 import { buildWebCheckForDraft, websiteStatusForDraft } from './webcheck';
+import { signatureIsEmpty } from './signature';
 
 // The browser NEVER calls Anthropic directly (that would expose your API key).
 // It calls your own serverless function, which holds the key.
@@ -36,7 +38,13 @@ export async function generateDraft(lead, sender) {
     recommended_send_to: sendTo,
     recommended_salutation: salutation,
     sender_name: sender.name || 'Your name',
+    sender_title: sender.title || '',
+    sender_company: sender.company || '',
+    sender_business_info: sender.businessInfo || '',
     sender_offer: sender.offer || 'website design & development services',
+    // With a saved signature the email adds name, title and links itself, so the
+    // draft should end on a closing phrase only. Without one it signs off by name.
+    signature_mode: signatureIsEmpty(sender.signatureHtml) ? 'in_body' : 'auto',
     voice_profile: voiceProfile,
     reference_notes: referenceNotes,
   };
@@ -44,15 +52,7 @@ export async function generateDraft(lead, sender) {
   const { data: { session } } = await supabase.auth.getSession();
   if (!session) throw new Error('Not signed in');
 
-  const res = await fetch(functionUrl('draft'), {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${session.access_token}`,
-    },
-    body: JSON.stringify(payload),
-  });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || `Draft request failed: ${res.status}`);
-  return { ...data, sendTo }; // { subject, body, evaluation[], generatedAt, sendTo }
+  const data = await callFunction(functionUrl('draft'), { token: session.access_token, body: payload, fallback: 'Draft request failed' });
+  // signatureMode is remembered so the app can warn if the signature is later removed.
+  return { ...data, sendTo, signatureMode: payload.signature_mode }; // { subject, body, evaluation[], generatedAt, sendTo, signatureMode }
 }

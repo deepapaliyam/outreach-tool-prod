@@ -1,75 +1,58 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
+import { Mail } from 'lucide-react';
 import { supabase } from '../lib/supabase';
-import { functionUrl } from '../lib/functionUrl';
+import { Spinner } from './ui';
 
-// Sits on the Drafts tab. Lets an already-logged-in (email/password) user
-// additionally link their Google identity, requesting Gmail-send scope,
-// then captures the one-time refresh token and hands it to the
-// gmail-store-token function to persist server-side.
+// The connection half of the Gmail card on the Email Draft page. Lets an
+// already-logged-in (email/password) user additionally link their Google
+// identity, requesting Gmail-send scope. The one-time refresh token that
+// comes back after the redirect is stored by lib/gmailToken.js, called from
+// the sign-in gate, so it is captured whichever page the browser lands on.
 //
-// Also checks REAL linked state on mount (not just "did a fresh OAuth
-// redirect just happen") and offers a Disconnect action — Supabase
-// refuses to re-run linkIdentity() while an identity is already linked,
-// so if the very first grant happened before Manual Linking was turned
-// on (and so came back missing scopes), disconnecting is the only way
-// to force Google to show a genuinely fresh consent screen.
-export default function GmailConnect() {
+// It also checks the REAL linked state on mount and offers a Disconnect
+// action — Supabase refuses to re-run linkIdentity() while an identity is
+// already linked, so if the very first grant came back missing scopes,
+// disconnecting is the only way to force a genuinely fresh consent screen.
+export const RETURN_TAB_KEY = 'outreach.returnTab';
+
+export default function GmailConnect({ address }) {
   const [connected, setConnected] = useState(null); // null = checking
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
 
-  const checkLinked = async () => {
+  const checkLinked = useCallback(async () => {
     try {
-      const { data, error } = await supabase.auth.getUserIdentities();
-      if (error) throw error;
+      const { data, error: e } = await supabase.auth.getUserIdentities();
+      if (e) throw e;
       setConnected((data?.identities || []).some(i => i.provider === 'google'));
-    } catch (e) {
+    } catch {
       setConnected(false);
     }
-  };
+  }, []);
 
   useEffect(() => {
     checkLinked();
-    // After the OAuth redirect back, Supabase briefly exposes
-    // provider_refresh_token on the session — capture it once, then store it.
-    const { data: sub } = supabase.auth.onAuthStateChange(async (event, session) => {
-      const anySession = session;
-      if (anySession && anySession.provider_refresh_token && anySession.provider_token) {
-        try {
-          const { data: userData } = await supabase.auth.getUser();
-          await fetch(functionUrl('gmail-store-token'), {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              Authorization: `Bearer ${anySession.access_token}`,
-            },
-            body: JSON.stringify({
-              refresh_token: anySession.provider_refresh_token,
-              gmail_address: userData?.user?.email || null,
-            }),
-          });
-          setConnected(true);
-        } catch (e) {
-          setError('Connected to Google, but saving the token failed — try again.');
-        }
-      }
-    });
-    return () => sub.subscription.unsubscribe();
-  }, []);
+    const onLinked = (ev) => {
+      if (ev.detail && ev.detail.ok) { setError(''); checkLinked(); }
+      else setError('Connected to Google, but saving the permission failed — try again.');
+    };
+    window.addEventListener('gmail-linked', onLinked);
+    return () => window.removeEventListener('gmail-linked', onLinked);
+  }, [checkLinked]);
 
   const connect = async () => {
     setBusy(true);
     setError('');
-    const { error } = await supabase.auth.linkIdentity({
+    try { sessionStorage.setItem(RETURN_TAB_KEY, 'drafts'); } catch { /* the app just opens on its first page */ }
+    const { error: e } = await supabase.auth.linkIdentity({
       provider: 'google',
       options: {
         scopes: 'https://www.googleapis.com/auth/gmail.send',
         queryParams: { access_type: 'offline', prompt: 'consent' },
       },
     });
-    if (error) { setError(error.message); setBusy(false); }
-    // on success, the browser redirects to Google, then back — the
-    // useEffect above picks up the token when it returns.
+    if (e) { setError(e.message); setBusy(false); }
+    // on success, the browser redirects to Google, then back.
   };
 
   const disconnect = async () => {
@@ -77,8 +60,8 @@ export default function GmailConnect() {
     setBusy(true);
     setError('');
     try {
-      const { data, error } = await supabase.auth.getUserIdentities();
-      if (error) throw error;
+      const { data, error: e } = await supabase.auth.getUserIdentities();
+      if (e) throw e;
       const googleIdentity = (data?.identities || []).find(i => i.provider === 'google');
       if (googleIdentity) {
         const { error: unlinkErr } = await supabase.auth.unlinkIdentity(googleIdentity);
@@ -92,27 +75,35 @@ export default function GmailConnect() {
     }
   };
 
-  if (connected === null) {
-    return <span className="hint">Checking Gmail connection…</span>;
-  }
-
-  if (connected) {
-    return (
-      <div className="row-inline">
-        <span className="tag verified">Gmail connected</span>
-        <button className="btn-tiny" onClick={disconnect} disabled={busy}>
-          {busy ? 'Disconnecting…' : 'Disconnect (to fix permissions / reconnect fresh)'}
-        </button>
-        {error && <div className="status-line" style={{ color: '#B0361F' }}>{error}</div>}
-      </div>
-    );
-  }
   return (
-    <div>
-      <button className="btn-ghost" onClick={connect} disabled={busy}>
-        {busy ? 'Connecting…' : 'Connect Gmail to send'}
-      </button>
-      {error && <div className="status-line" style={{ color: '#B0361F' }}>{error}</div>}
+    <div className="row" style={{ gap: 14 }}>
+      <div className="gmail-ico"><Mail size={19} /></div>
+      <div>
+        {connected === null && <div className="strong">Checking Gmail connection…</div>}
+        {connected === true && (
+          <>
+            <div className="strong">Gmail connected <span className="tag ok" style={{ marginLeft: 6 }}>Active</span></div>
+            <div className="small dim">{address || 'Your Google account'} ·{' '}
+              <button className="btn link sm" style={{ padding: 0 }} onClick={disconnect} disabled={busy}
+                title="Use this to fix permissions, or after Google has expired the connection">
+                {busy ? 'Working…' : 'Disconnect Gmail'}
+              </button>
+            </div>
+          </>
+        )}
+        {connected === false && (
+          <>
+            <div className="strong">Gmail not connected</div>
+            <div className="small dim">Connect once so the tool can send from your own account.</div>
+          </>
+        )}
+        {error && <div className="small" style={{ color: 'var(--bad)', marginTop: 4 }} role="alert">{error}</div>}
+      </div>
+      {connected === false && (
+        <button className="btn primary" onClick={connect} disabled={busy}>
+          {busy ? <><Spinner size={13} /> Connecting…</> : 'Connect Gmail to send'}
+        </button>
+      )}
     </div>
   );
 }
