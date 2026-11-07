@@ -275,7 +275,7 @@ function classifyGmailFailure(status: number, data: any): { code: string; fatal:
     return { code: 'gmail_reconnect', fatal: true, error: 'Gmail no longer accepts your saved connection. Click "Disconnect Gmail", then "Connect Gmail" again. Nothing was sent.' };
   }
   if (status === 403 && /insufficient|scope/.test(blob)) {
-    return { code: 'gmail_scopes', fatal: true, error: 'Your Gmail connection is missing the permission to send email. Click "Disconnect Gmail", then "Connect Gmail" and approve sending. Nothing was sent.' };
+    return { code: 'gmail_scopes', fatal: true, error: 'Your Gmail connection is missing the permission to send email. Click "Disconnect Gmail", then "Connect Gmail to send", and on Google’s screen tick the box that lets the app send email on your behalf. If Google does not show that box, add the gmail.send permission under Data Access in your Google Cloud app first (GMAIL_OAUTH_SETUP.md, step 5). Nothing was sent.' };
   }
   if ((status === 403 || status === 429) && /ratelimit|dailylimit|quota/.test(blob)) {
     return { code: 'gmail_limit', fatal: true, error: 'Gmail itself has stopped this account from sending for now (its own sending limit). Wait a while — usually up to 24 hours — before sending again. Nothing was sent.' };

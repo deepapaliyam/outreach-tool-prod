@@ -3,6 +3,7 @@ import { ShieldCheck, RefreshCw } from 'lucide-react';
 import { PageHeader, StatCard, Empty, Spinner, Notice, Segmented } from '../components/ui';
 import ServiceCheck from '../components/ServiceCheck';
 import { loadAdminOverview, loadAdminEvents, loadAdminGmail } from '../lib/admin';
+import { explainUnreachable } from '../lib/backendProbe';
 import { KIND_LABEL, shortId } from '../lib/gmailResponses';
 
 const TABS = [['overview', 'Overview'], ['users', 'Users'], ['events', 'Errors & events'], ['gmail', 'Gmail responses'], ['service', 'Service check']];
@@ -13,14 +14,11 @@ const when = (iso) => (iso ? new Date(iso).toLocaleString([], { day: 'numeric', 
 // connection health, error reports, per-user usage and every Gmail response.
 // This page is only ever built for administrators, and every call it makes is
 // refused by the server for anyone else.
-// Admin-only pointers. "Could not reach the server" almost always means the admin function is not
-// deployed yet (the browser's request is refused before it reaches anything); a paused project looks the same.
+// Admin-only pointers for errors other than "no answer at all" (that one is explained in full by
+// explainUnreachable, which checks whether Supabase itself is awake).
 function adminHint(error) {
   const msg = String(error || '');
-  if (/v7_schema/i.test(msg)) return '';
-  if (/could not reach the server/i.test(msg)) {
-    return ' Most often the "admin" function has not been deployed yet — run npm run deploy:functions, then reload. If it is deployed, check that the Supabase project is not paused. (If Supabase answers with a missing-table message instead, run supabase/v7_schema.sql in the SQL Editor.)';
-  }
+  if (/v7_schema|could not reach (the server|supabase)|did not answer/i.test(msg)) return '';
   return ' (If this mentions a missing function or table, run supabase/v7_schema.sql in the SQL Editor and deploy the admin function.)';
 }
 
@@ -44,7 +42,7 @@ export default function AdminPage({ ctl }) {
       else if (which === 'events') setEvents((await loadAdminEvents(eventKind, 150)).events || []);
       else if (which === 'gmail') setGmail((await loadAdminGmail(150)).responses || []);
     } catch (e) {
-      setError(e.adminMessage || e.message);
+      setError(e.network ? await explainUnreachable('admin') : (e.adminMessage || e.message));
     } finally {
       setLoading(false);
     }

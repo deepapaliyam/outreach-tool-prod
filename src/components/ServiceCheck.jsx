@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { CheckCircle2, AlertTriangle, XCircle, Activity } from 'lucide-react';
 import { runServiceCheck, summarizeChecks } from '../lib/healthCheck';
+import { explainUnreachable } from '../lib/backendProbe';
 import { Spinner } from './ui';
 
 // Lives in the Admin tab. One button that tests the AI key, search key,
@@ -22,7 +23,7 @@ export default function ServiceCheck({ runSignal = 0 }) {
       setResult(await runServiceCheck());
     } catch (e) {
       setResult(null);
-      setError(e.message);
+      setError(e.network ? await explainUnreachable('health-check') : e.message);
     } finally {
       setBusy(false);
     }

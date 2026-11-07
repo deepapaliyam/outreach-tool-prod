@@ -4,6 +4,15 @@
 -- Safe to re-run. Adds columns only - nothing is deleted or changed.
 -- =====================================================================
 
+-- v8 builds on v7. If v7_schema.sql has not been run yet, stop here with a plain message
+-- (nothing below is applied) instead of failing halfway with "relation does not exist".
+do $$
+begin
+  if to_regclass('public.gmail_responses') is null then
+    raise exception 'Run supabase/v7_schema.sql first (it creates the Gmail response log this file adds to), then run v8_schema.sql again.';
+  end if;
+end $$;
+
 -- Follow-up emails sent to a lead, newest last:
 --   [{ "sent_at": "...", "subject": "...", "body": "...", "thread_id": "...", "message_id": "..." }]
 -- Written only by the send-email function. The ORIGINAL email stays in

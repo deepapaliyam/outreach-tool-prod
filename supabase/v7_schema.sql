@@ -5,6 +5,16 @@
 -- Safe to re-run.
 -- =====================================================================
 
+-- v7 builds on the earlier setup files. If they were never run, stop here with a plain
+-- message (nothing below is applied) instead of failing halfway with "relation does not exist".
+do $$
+begin
+  if to_regclass('public.leads') is null or to_regclass('public.outcomes') is null
+     or to_regclass('public.sender_profiles') is null or to_regclass('public.gmail_send_log') is null then
+    raise exception 'Some earlier setup files have not been run yet. Run supabase/00_run_everything.sql instead - it runs every setup file in the right order - then come back.';
+  end if;
+end $$;
+
 -- ---------------------------------------------------------------------
 -- 1. Profile & signature (Profile & Settings tab)
 --    Ordinary per-user data; the existing "own sender profile" policy

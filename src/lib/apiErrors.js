@@ -35,6 +35,13 @@ export function functionError(res, data, fallback) {
     fatal = true;
   }
 
+  // The same for the "connected, but without the send permission" refusal.
+  if (!code && /insufficient authentication scopes|ACCESS_TOKEN_SCOPE_INSUFFICIENT|insufficientPermissions/i.test(adminMessage)) {
+    message = 'Your Gmail connection is missing the permission to send email. Click "Disconnect Gmail", then "Connect Gmail to send", and on Google’s screen tick the box that lets the app send email on your behalf. If Google does not show that box, add the gmail.send permission under Data Access in your Google Cloud app first (GMAIL_OAUTH_SETUP.md, step 5). Nothing was sent.';
+    code = 'gmail_scopes';
+    fatal = true;
+  }
+
   // Supabase's gateway (not our code) answers 401 when the login has lapsed.
   if (res.status === 401 && !code) {
     message = 'Your sign-in has expired. Sign out and sign in again, then retry.';

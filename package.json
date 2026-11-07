@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "deploy:functions": "npx supabase functions deploy draft && npx supabase functions deploy refine-selection && npx supabase functions deploy enrich-lead && npx supabase functions deploy send-email && npx supabase functions deploy admin && npx supabase functions deploy health-check --no-verify-jwt"
+    "deploy:functions": "node scripts/deploy-functions.mjs"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.45.0",

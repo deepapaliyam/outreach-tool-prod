@@ -16,6 +16,13 @@ screen" wizard is now **Google Auth Platform** with separate sections
    try. Anyone not listed is blocked by Google at the consent screen.
 5. **Data Access → Add or remove scopes:** add
    `https://www.googleapis.com/auth/gmail.send` and save.
+   Google only lists scopes of APIs that are switched on in the project.
+   If searching "gmail" shows only *Cloud Pub/Sub API* (or nothing from
+   Gmail), the Gmail API from step 2 is not enabled yet — enable it, then
+   search again. You can also paste the scope into the **Manually add
+   scopes** box at the bottom of that panel, click **Add to table**, then
+   **Update** and **Save**. Check that the table afterwards lists
+   `.../auth/gmail.send` ("Send email on your behalf").
 6. **Clients → Create client:** type **Web application**. Under
    **Authorized redirect URIs** add
    `https://YOUR-PROJECT-REF.supabase.co/auth/v1/callback`.
@@ -33,11 +40,13 @@ screen" wizard is now **Google Auth Platform** with separate sections
    is disabled"*.
 9. Store the same credentials for the functions:
    ```
-   npx supabase secrets set GOOGLE_CLIENT_ID=...
-   npx supabase secrets set GOOGLE_CLIENT_SECRET=...
-   npx supabase functions deploy gmail-store-token
-   npx supabase functions deploy send-email
+   npx supabase secrets set GOOGLE_CLIENT_ID=... --project-ref YOUR-REF
+   npx supabase secrets set GOOGLE_CLIENT_SECRET=... --project-ref YOUR-REF
+   npm run deploy:functions -- YOUR-REF
    ```
+   `YOUR-REF` is the first part of your Supabase address
+   (`https://YOUR-REF.supabase.co`). Naming it every time stops the
+   command from using some other project the folder happens to be linked to.
 
 ## C. Connecting inside the app
 
@@ -45,11 +54,15 @@ screen" wizard is now **Google Auth Platform** with separate sections
     It will say the app is "unverified" — expected in Testing mode
     (Advanced → continue). Check the consent screen lists sending email
     on your behalf before approving.
-11. If sending later fails with *"insufficient authentication scopes"*,
-    the connection was made without the send permission. Click
-    **Disconnect** next to "Gmail connected", then connect again and
-    approve the Gmail permission. (Supabase won't re-run the flow while
-    an identity is already linked, which is why Disconnect exists.)
+11. If sending later fails with *"insufficient authentication scopes"*
+    (or "missing the permission to send email"), the connection was made
+    without the send permission. Two things cause it: the `gmail.send`
+    scope was not added under **Data Access** (step 5 — add it, Update,
+    Save), or its checkbox was left unticked on Google's screen. Fix the
+    first if needed, then click **Disconnect** next to "Gmail connected",
+    connect again and tick the box that allows sending email. (Supabase
+    won't re-run the flow while an identity is already linked, which is
+    why Disconnect exists.)
 
 ## Handing over to a client
 

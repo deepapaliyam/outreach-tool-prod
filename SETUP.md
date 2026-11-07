@@ -8,33 +8,70 @@ aren't in the zip, so they stay as they are).
 
 ## A. Updating an install you already have running
 
+> **Make sure every change lands in the right Supabase project.**
+> Your live app talks to exactly one project: the one in its
+> `VITE_SUPABASE_URL` (Vercel → your project → Settings → Environment
+> Variables). Its first part, 20 letters like `abcdefghijklmnopqrst`, is the
+> **project reference**. Three things must all go to that project: the **SQL**
+> (open that project in the Supabase dashboard before pasting — check the
+> reference in the address bar), the **functions**, and the **secrets**.
+> The Supabase command-line tool silently uses whichever project this folder
+> was last "linked" to, which is how a deploy ends up in the wrong place. So
+> the commands below always name the project:
+> `npm run deploy:functions -- YOUR-REF` (add `--dry-run` to preview).
+> Without `YOUR-REF` it reads `VITE_SUPABASE_URL` from your `.env` file.
+
 Do these in order. Anything you've already done is harmless to repeat.
 
-1. **SQL (new this version).** Supabase → SQL Editor → paste and run
-   `supabase/v8_schema.sql`. It is safe to run twice and only *adds* things:
-   a place to keep follow-up emails, a place to keep the upsell ideas written
-   for a client, and a marker that tells a follow-up from a first email in the
-   Gmail response log. (Already on v7? That is the only SQL file you need.
-   Coming from an older version? Do the v7 steps in the box below first.)
+1. **SQL (new this version) — the simple way.** Supabase → SQL Editor → New
+   query → paste the whole of **`supabase/00_run_everything.sql`** → Run. It
+   runs every setup file (the original ones, v7 and v8) in the right order, adds
+   only what is missing, keeps all your leads and outcomes, and is safe to run
+   again. Supabase may ask you to confirm because the file has "drop policy"
+   lines; that only refreshes access rules, so confirm. Then, once, make
+   yourself administrator (the SQL is at the very end of that file, and in
+   step 2 of the v7 box below).
+   *Prefer one file at a time?* v8 needs v7, and v7 needs the original setup
+   files: `schema` → `gmail_schema` → `snapshot_schema` → `sender_profile_schema`
+   → `test_mode_schema` → `send_safety_schema` → `web_findings_schema` →
+   `v7_schema` → `v8_schema`. Running one too early stops with a plain message
+   ("Run supabase/v7_schema.sql first" or "Some earlier setup files have not
+   been run yet") and changes nothing. The older wording was *relation
+   "public.gmail_responses" does not exist* or *relation "public.sender_profiles"
+   does not exist* — the same thing: an earlier file was skipped.
 2. **Deploy the functions** (run in the project folder). Two of them changed —
    `draft` (follow-ups and client ideas) and `send-email` (the "already
    emailed" and follow-up rules, and a clearer Gmail-reconnect message) — and
-   deploying all six together keeps them in step:
+   deploying all eight together keeps them in step:
    ```
-   npm run deploy:functions
+   npm run deploy:functions -- YOUR-REF
    ```
-   That one command runs the six `npx supabase functions deploy …` lines
+   Replace `YOUR-REF` with your project reference (see the box above). The
+   command prints which project it is deploying to — read that line — and
+   says so if the folder had been linked to a different one. It runs the
+   eight `npx supabase functions deploy … --project-ref YOUR-REF` lines
    (`health-check` with `--no-verify-jwt`, deliberately — see "Keeping it
    running"). Afterwards open Supabase → **Edge Functions** and check that
    *Last updated* for `send-email` and `draft` shows today. **If it still
    shows an old date, the old code is still running** — that is the usual
-   reason a fix "didn't work".
+   reason a fix "didn't work". The Admin tab checks this for you: if it says
+   *"Your Supabase project is running, but the "admin" function did not
+   answer"*, the function is not deployed — run the command again and make
+   sure it finishes without an error. If it says *"Could not reach Supabase
+   at all"*, check your internet, then open supabase.com/dashboard and click
+   **Restore project** (free projects pause after a week without activity).
 3. **Reconnect Gmail** (needed if sends stopped with *invalid_grant* or
    *"Your Gmail connection has expired"*). Email Draft → **Disconnect Gmail**,
    then **Connect Gmail to send**, and approve. Google expires the permission
    every 7 days while your Google app is in *Testing* mode (see "Keeping it
    running"), so this is the whole fix; nothing is lost and nothing was sent
    while it was broken. Then **Admin → Service check** should show Gmail green.
+   If instead the error says *"missing the permission to send email"*
+   (Google's *insufficient authentication scopes*), the connection was made
+   without the send permission: in Google Cloud, make sure the **Gmail API**
+   is enabled and `gmail.send` is listed under **Data Access**
+   (`GMAIL_OAUTH_SETUP.md`, steps 2 and 5), then Disconnect, Connect again
+   and tick the box that lets the app send email.
 4. **Frontend** — replace the files, then
    `git add . && git commit -m "Sent and Clients tabs, follow-ups" && git push`.
    Vercel redeploys on its own.
@@ -81,8 +118,14 @@ Do these in order. Anything you've already done is harmless to repeat.
   listing, a free-mail address…), and **Suggest ideas**: the AI writes ideas for
   that client from your offer, their web check and your notes. It costs one AI
   call and the result is saved, so reopening the tab costs nothing.
-- **Clearer Gmail-reconnect message.** Google's raw *invalid_grant* text is
-  replaced by plain steps in the screen, even before the new functions are deployed.
+- **Deploys can no longer land in the wrong project.** `npm run deploy:functions`
+  now names the project itself (from what you type or your `.env`), prints which one it is
+  using, and warns if the folder was linked to a different project.
+- **Admin tab tells "not deployed" from "paused".** When the server can't be
+  reached it asks Supabase itself whether the project is awake, and shows only the fix that applies.
+- **Clearer Gmail-reconnect messages.** Google's raw *invalid_grant* and
+  *insufficient authentication scopes* texts are replaced by plain steps in
+  the screen, even before the new functions are deployed.
 
 **Assumptions I made — change them if they're wrong**
 
@@ -92,7 +135,7 @@ Do these in order. Anything you've already done is harmless to repeat.
 - The **Sent** tab opens on **Last 1 week**, and remembers your choice.
 - Follow-up limits (3 days, 2 follow-ups) are enforced by the server.
 
-**Coming from before v7?** Do these first, then the v8 steps above.
+**Coming from before v7?** If you used `00_run_everything.sql` above, the SQL part is already done; do the rest of these (administrator, functions, frontend), then the v8 steps above.
 
 1. **SQL.** Supabase → SQL Editor → paste and run
    `supabase/v7_schema.sql`. It is safe to run twice. It adds the profile
@@ -109,14 +152,10 @@ Do these in order. Anything you've already done is harmless to repeat.
    button for it anywhere in the app, so nobody can promote themselves.
 3. **Deploy the functions** (run in the project folder):
    ```
-   npx supabase functions deploy draft
-   npx supabase functions deploy refine-selection
-   npx supabase functions deploy enrich-lead
-   npx supabase functions deploy send-email
-   npx supabase functions deploy admin
-   npx supabase functions deploy health-check --no-verify-jwt
+   npm run deploy:functions -- YOUR-REF
    ```
-   The `--no-verify-jwt` on `health-check` is deliberate: that function
+   That deploys all eight to the project you name (`health-check` gets
+   `--no-verify-jwt`). The `--no-verify-jwt` on `health-check` is deliberate: that function
    checks the sign-in itself, which is what lets an uptime monitor call it
    (see "Keeping it running"). Use it exactly as written. The new `admin`
    function is deployed normally.
@@ -165,11 +204,13 @@ Do these in order. Anything you've already done is harmless to repeat.
 
 ## B. Fresh install, start to finish
 
-1. **Supabase project** → SQL Editor, run in this order:
-   `schema.sql` → `gmail_schema.sql` → `snapshot_schema.sql` →
-   `sender_profile_schema.sql` → `test_mode_schema.sql` → `send_safety_schema.sql` →
-   `web_findings_schema.sql` → `v7_schema.sql` → `v8_schema.sql`, then make
-   yourself the administrator with the SQL in the v7 box of section A (step 2 there).
+1. **Supabase project** → SQL Editor → paste and run the one file
+   **`supabase/00_run_everything.sql`** (it contains every setup file, in order),
+   then make yourself the administrator with the SQL at the end of that file.
+   (Or run these one at a time, in this order: `schema.sql` → `gmail_schema.sql` →
+   `snapshot_schema.sql` → `sender_profile_schema.sql` → `test_mode_schema.sql` →
+   `send_safety_schema.sql` → `web_findings_schema.sql` → `v7_schema.sql` →
+   `v8_schema.sql`.)
 2. **Supabase dashboard settings** (one-time, all off by default):
    - Authentication → Providers → **Email** → turn **Confirm email OFF**
      (password sign-up must work without a mail server).
@@ -182,26 +223,23 @@ Do these in order. Anything you've already done is harmless to repeat.
    - Authentication → URL Configuration → set **Site URL** to your live
      app URL and add it under **Redirect URLs** with `/**` on the end.
 3. **Google Cloud** — follow `GMAIL_OAUTH_SETUP.md`.
-4. **Secrets and functions** (run inside the project folder, linked to the
-   right project with `npx supabase link --project-ref YOUR-REF`):
+4. **Secrets and functions** (run inside the project folder). Every command
+   names the project with `--project-ref YOUR-REF`, so it cannot land in
+   another one:
    ```
-   npx supabase secrets set ANTHROPIC_API_KEY=sk-ant-...
-   npx supabase secrets set GOOGLE_CLIENT_ID=...
-   npx supabase secrets set GOOGLE_CLIENT_SECRET=...
-   npx supabase secrets set SERPER_API_KEY=...
+   npx supabase login
+   npx supabase secrets set ANTHROPIC_API_KEY=sk-ant-... --project-ref YOUR-REF
+   npx supabase secrets set GOOGLE_CLIENT_ID=... --project-ref YOUR-REF
+   npx supabase secrets set GOOGLE_CLIENT_SECRET=... --project-ref YOUR-REF
+   npx supabase secrets set SERPER_API_KEY=... --project-ref YOUR-REF
    # optional:
    #   ANTHROPIC_MODEL=...        (override the AI model without redeploying)
    #   HEALTH_CHECK_TOKEN=...     (lets a monitor call health-check; see "Keeping it running")
 
-   npx supabase functions deploy draft
-   npx supabase functions deploy send-email
-   npx supabase functions deploy gmail-store-token
-   npx supabase functions deploy refine-selection
-   npx supabase functions deploy fetch-references
-   npx supabase functions deploy enrich-lead
-   npx supabase functions deploy admin
-   npx supabase functions deploy health-check --no-verify-jwt
+   npm run deploy:functions -- YOUR-REF
    ```
+   To see which secrets a project has (names only, never values):
+   `npx supabase secrets list --project-ref YOUR-REF`.
    Check Supabase → Edge Functions afterwards: all eight should be listed.
    (An empty list is why drafts fail with "Failed to fetch".)
 5. **Local run:** copy `.env.example` to `.env` (a real file named
@@ -242,7 +280,7 @@ and runs it. It uses a few tokens of AI and one search credit, and sends no emai
 can be called by a free scheduler or uptime monitor, with no login:
 
 1. Choose a long random text and store it:
-   `npx supabase secrets set HEALTH_CHECK_TOKEN=your-long-random-text`
+   `npx supabase secrets set HEALTH_CHECK_TOKEN=your-long-random-text --project-ref YOUR-REF`
 2. Have a scheduler (n8n, which you already use, works) call
    `https://YOUR-PROJECT.supabase.co/functions/v1/health-check`
    every few hours with the header `x-monitor-token: your-long-random-text`.
