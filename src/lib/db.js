@@ -1,4 +1,5 @@
 import { supabase } from './supabase';
+import { fetchAllPages, chunk } from './paging';
 
 // All database access lives here so the UI never talks to Supabase directly.
 // Every function assumes the user is signed in; RLS enforces per-user scoping
@@ -12,37 +13,50 @@ async function currentUserId() {
 // --- LEADS ----------------------------------------------------------------
 
 export async function fetchLeads() {
-  const { data, error } = await supabase
-    .from('leads')
-    .select('*')
-    .order('priority_score', { ascending: false });
-  if (error) throw error;
-  return data ?? [];
+  // All of them, a page at a time: one request would silently stop at 1000 rows.
+  // The second ORDER BY (id) keeps the pages from skipping or repeating rows that share a score.
+  return fetchAllPages(async (from, to) => {
+    const { data, error } = await supabase
+      .from('leads')
+      .select('*')
+      .order('priority_score', { ascending: false })
+      .order('id', { ascending: true })
+      .range(from, to);
+    if (error) throw error;
+    return data ?? [];
+  });
 }
 
-// Insert only leads whose entity_id isn't already stored for this user.
+// Save only the businesses that are not saved yet. A business is "the same" when its entity_id matches one already
+// saved for this user; the database also enforces that (unique user_id + entity_id), and the insert below simply
+// skips a duplicate instead of failing, so a repeated or overlapping upload can never create a second copy.
 // Returns { inserted, skipped }.
 export async function upsertNewLeads(scoredLeads) {
   const userId = await currentUserId();
   if (!userId) throw new Error('Not signed in');
 
-  const entityIds = scoredLeads.map(l => l.entity_id);
-  const { data: existing, error: exErr } = await supabase
-    .from('leads')
-    .select('entity_id')
-    .in('entity_id', entityIds);
-  if (exErr) throw exErr;
+  // the same business twice in one list counts once
+  const unique = [...new Map(scoredLeads.map(l => [String(l.entity_id), l])).values()];
 
-  const have = new Set((existing ?? []).map(r => r.entity_id));
-  const toInsert = scoredLeads
-    .filter(l => !have.has(l.entity_id))
-    .map(l => ({ ...l, user_id: userId }));
-
-  if (toInsert.length) {
-    const { error } = await supabase.from('leads').insert(toInsert);
+  // Which are saved already? Asked in small batches: one request naming thousands of ids is refused as too long.
+  const have = new Set();
+  for (const ids of chunk(unique.map(l => String(l.entity_id)), 100)) {
+    const { data, error } = await supabase.from('leads').select('entity_id').in('entity_id', ids);
     if (error) throw error;
+    for (const r of data ?? []) have.add(String(r.entity_id));
   }
-  return { inserted: toInsert.length, skipped: scoredLeads.length - toInsert.length };
+
+  const toInsert = unique.filter(l => !have.has(String(l.entity_id))).map(l => ({ ...l, user_id: userId }));
+  let inserted = 0;
+  for (const rows of chunk(toInsert, 200)) {
+    const { data, error } = await supabase
+      .from('leads')
+      .upsert(rows, { onConflict: 'user_id,entity_id', ignoreDuplicates: true })
+      .select('id');
+    if (error) throw error;
+    inserted += (data ?? []).length;   // only the rows really added (a duplicate that slipped through is not counted)
+  }
+  return { inserted, skipped: scoredLeads.length - inserted };
 }
 
 export async function updateLeadDraft(leadId, draft) {
@@ -86,9 +100,11 @@ export async function bulkUpdateLeadScores(leads, scoreFieldsByLeadId) {
 // --- OUTCOMES -------------------------------------------------------------
 
 export async function fetchOutcomes() {
-  const { data, error } = await supabase.from('outcomes').select('*');
-  if (error) throw error;
-  return data ?? [];
+  return fetchAllPages(async (from, to) => {
+    const { data, error } = await supabase.from('outcomes').select('*').order('lead_id', { ascending: true }).range(from, to);
+    if (error) throw error;
+    return data ?? [];
+  });
 }
 
 // Create or update the single outcome row for a lead.
@@ -167,15 +183,18 @@ export async function fetchGmailResponses(limit = 100) {
 // Every email Gmail accepted (real sends and test sends), for the Sent tab and for
 // keeping already-sent leads out of the sending queue. Failures are not included.
 export async function fetchSendHistory(limit = 3000) {
-  const { data, error } = await supabase
-    .from('gmail_responses')
-    .select('*')
-    .eq('ok', true)
-    .in('kind', ['send', 'test'])
-    .order('created_at', { ascending: false })
-    .limit(limit);
-  if (error) throw error;
-  return data ?? [];
+  return fetchAllPages(async (from, to) => {
+    const { data, error } = await supabase
+      .from('gmail_responses')
+      .select('*')
+      .eq('ok', true)
+      .in('kind', ['send', 'test'])
+      .order('created_at', { ascending: false })
+      .order('id', { ascending: true })
+      .range(from, to);
+    if (error) throw error;
+    return data ?? [];
+  }, { maxRows: limit });
 }
 
 // --- SIGNATURE LOGO ----------------------------------------------------------------

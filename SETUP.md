@@ -118,6 +118,15 @@ Do these in order. Anything you've already done is harmless to repeat.
   listing, a free-mail address…), and **Suggest ideas**: the AI writes ideas for
   that client from your offer, their web check and your notes. It costs one AI
   call and the result is saved, so reopening the tab costs nothing.
+- **Every lead now loads — not just the first 1000.** Supabase silently returns at
+  most 1000 rows per request, so with more than 1000 saved leads the screen showed
+  only the 1000 highest-scored ones (newer, lower-scored leads were missing from the
+  list and from the stat bar; "Re-score all" and exports were also limited to those).
+  Leads, outcomes and sent history now load page by page. Uploads are safer too:
+  already-saved businesses are looked up in small batches, a business that is
+  already saved is skipped by the database instead of failing the upload, and ids
+  with stray spaces (or a number in one row and text in another) count as one business.
+  To see your real totals, run `supabase/check_lead_counts.sql` in the SQL Editor.
 - **New home screen (Upload & Prioritize).** A stat bar on top counts leads
   added today / this week (since Monday) / this month (since the 1st), leads
   actioned (emailed) and leads pending action; click a number to filter the

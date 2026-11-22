@@ -82,7 +82,7 @@ function pick(row, keys) {
 export function parseWorkbookRows(rows) {
   const byId = new Map();
   rows.forEach(r => {
-    const id = pick(r, ['entityId', 'EntityId', 'Entity ID', 'entity_id']);
+    const id = String(pick(r, ['entityId', 'EntityId', 'Entity ID', 'entity_id'])).trim();   // "U123", "U123 " and 123 / "123" are each one business
     if (!id) return;
     if (!byId.has(id)) byId.set(id, []);
     byId.get(id).push(r);
