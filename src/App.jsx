@@ -30,6 +30,7 @@ import { RETURN_TAB_KEY } from './components/GmailConnect';
 import Sidebar from './components/Sidebar';
 import { Toasts, Spinner } from './components/ui';
 import UploadPage from './pages/UploadPage';
+import { DEFAULT_FILTERS, applyLeadFilters } from './lib/leadList';
 import DraftPage from './pages/DraftPage';
 import SentPage from './pages/SentPage';
 import ClientsPage from './pages/ClientsPage';
@@ -201,7 +202,7 @@ export default function App() {
   const setPreferredRegions = (r) => { setPreferredRegionsState(r); writeJson('preferredRegions', r); };
   const [autoCheckOnUpload, setAutoCheckState] = useState(() => readJson('autoCheckOnUpload', true) !== false);
   const setAutoCheckOnUpload = (v) => { setAutoCheckState(v); writeJson('autoCheckOnUpload', v); };
-  const [filters, setFilters] = useState({ search: '', industry: '', state: '', minScore: 0 });
+  const [filters, setFilters] = useState(DEFAULT_FILTERS);
   const [uploadPage, setUploadPage] = useState(0);
   const [selectedId, setSelectedId] = useState(null);
 
@@ -594,15 +595,7 @@ export default function App() {
     }
   };
 
-  const filteredSorted = useMemo(() => leads
-    .filter(l => {
-      if (filters.search && !l.name.toLowerCase().includes(filters.search.toLowerCase())) return false;
-      if (filters.industry && l.nic_label !== filters.industry) return false;
-      if (filters.state && l.state !== filters.state) return false;
-      if (l.priority_score < filters.minScore) return false;
-      return true;
-    })
-    .sort((a, b) => b.priority_score - a.priority_score), [leads, filters]);
+  const filteredSorted = useMemo(() => applyLeadFilters(leads, filters), [leads, filters]);
   useEffect(() => { setUploadPage(0); }, [filters]);
 
   const industries = useMemo(() => [...new Set(leads.map(l => l.nic_label).filter(Boolean))].sort(), [leads]);

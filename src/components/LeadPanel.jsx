@@ -168,14 +168,26 @@ export function WebFindings({ lead, onCheck, checking }) {
   );
 }
 
-// The right-hand panel on Upload & Prioritize.
-export default function WhyPanel({ lead, onCheck, checking, onDraft }) {
+// The "Why this lead?" card on Upload & Prioritize. `compact` is the small card in the top row: the same
+// content, but the Draft button sits in the heading and the card scrolls inside itself instead of growing.
+export default function WhyPanel({ lead, onCheck, checking, onDraft, compact = false, cardRef }) {
   const stale = draftIsOlderThanWebCheck(lead);
+  const draftLabel = lead.outcome?.contacted ? 'View in Sent' : lead.draft ? 'Open the draft' : `Draft outreach for ${lead.name.split(' ')[0]}`;
+  const draftButton = (
+    <button className={`btn primary${compact ? ' sm' : ' mt16'}`} style={compact ? { flex: 'none' } : { width: '100%' }} onClick={() => onDraft(lead)}>
+      <Sparkles size={compact ? 13 : 15} /> {compact ? (lead.outcome?.contacted ? 'View in Sent' : lead.draft ? 'Open draft' : 'Draft') : draftLabel}
+    </button>
+  );
   return (
-    <div className="card" aria-label="Why this lead">
+    <div className={`card${compact ? ' why-compact' : ''}`} aria-label="Why this lead" ref={cardRef}>
       <div className="eyebrow">Why this lead?</div>
-      <h3 className="card-title" style={{ fontSize: 18, marginTop: 6 }}>{lead.name}</h3>
-      <div className="dim small">{[lead.nic_label, [lead.district, lead.state].filter(Boolean).join(', ')].filter(Boolean).join(' · ')}</div>
+      <div className={compact ? 'row between' : undefined} style={compact ? { alignItems: 'flex-start', flexWrap: 'nowrap', gap: 10 } : undefined}>
+        <div style={{ minWidth: 0 }}>
+          <h3 className="card-title" style={{ fontSize: compact ? 15 : 18, marginTop: 6 }}>{lead.name}</h3>
+          <div className="dim small">{[lead.nic_label, [lead.district, lead.state].filter(Boolean).join(', ')].filter(Boolean).join(' · ')}</div>
+        </div>
+        {compact && draftButton}
+      </div>
 
       <div className="why-score">
         <div className="big">{lead.priority_score}</div>
@@ -189,9 +201,7 @@ export default function WhyPanel({ lead, onCheck, checking, onDraft }) {
       <WebFindings lead={lead} onCheck={onCheck} checking={checking} />
       {stale && <div className="note warn mt12">The web check is newer than this lead's draft — regenerate it to use the latest findings.</div>}
 
-      <button className="btn primary mt16" style={{ width: '100%' }} onClick={() => onDraft(lead)}>
-        <Sparkles size={15} /> {lead.outcome?.contacted ? 'View in Sent' : lead.draft ? 'Open the draft' : `Draft outreach for ${lead.name.split(' ')[0]}`}
-      </button>
+      {!compact && draftButton}
     </div>
   );
 }

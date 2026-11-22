@@ -118,6 +118,15 @@ Do these in order. Anything you've already done is harmless to repeat.
   listing, a free-mail address…), and **Suggest ideas**: the AI writes ideas for
   that client from your offer, their web check and your notes. It costs one AI
   call and the result is saved, so reopening the tab costs nothing.
+- **New home screen (Upload & Prioritize).** A stat bar on top counts leads
+  added today / this week (since Monday) / this month (since the 1st), leads
+  actioned (emailed) and leads pending action; click a number to filter the
+  table to it. Upload, Prioritization settings and "Why this lead?" are three
+  compact cards in one row, and the ranked table is full width below. The
+  table is sorted by the day a lead was added (newest first) and, inside a day,
+  by score, with a heading row per day. New filters: **Date added**, **Status**
+  (all / pending / actioned) and **Sort** (newest-then-score, or best score only).
+  No database change — it uses the date each lead was saved.
 - **Deploys can no longer land in the wrong project.** `npm run deploy:functions`
   now names the project itself (from what you type or your `.env`), prints which one it is
   using, and warns if the folder was linked to a different project.
